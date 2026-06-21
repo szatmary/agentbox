@@ -3,6 +3,7 @@ package container
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,8 +21,10 @@ const (
 	subRun    = "run"
 	subExec   = "exec"
 	subStop   = "stop"
-	subDelete = "delete"
-	subImage  = "image" // used as: container image inspect <ref>
+	subDelete  = "delete"
+	subImage   = "image"   // used as: container image inspect <ref>
+	subInspect = "inspect" // used as: container inspect <id>
+
 )
 
 // commandFunc launches a command, streaming stdout/stderr to the given writers,
@@ -29,6 +32,10 @@ const (
 // not be launched (or another non-exit failure); a command that runs and exits
 // non-zero returns that code with a nil error.
 type commandFunc func(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) (exitCode int, err error)
+
+// streamFunc launches a command with stdin wired in addition to stdout/stderr,
+// for interactive/attached execs. Same exit-code/error contract as commandFunc.
+type streamFunc func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) (exitCode int, err error)
 
 // CLIRuntime is the production [Runtime] backed by Apple's `container` CLI. It
 // only functions on macOS with `container` installed and its service running;
@@ -40,12 +47,17 @@ type CLIRuntime struct {
 	Bin string
 	// run launches commands; defaults to execCommand. Injectable for tests.
 	run commandFunc
+	// stream launches stdio-attached commands; defaults to execStreamCommand.
+	// Injectable for tests (so ExecStream argv is asserted without a real VM).
+	stream streamFunc
 }
 
 var _ Runtime = (*CLIRuntime)(nil)
 
 // NewCLIRuntime returns a CLIRuntime using the real `container` binary.
-func NewCLIRuntime() *CLIRuntime { return &CLIRuntime{Bin: "container", run: execCommand} }
+func NewCLIRuntime() *CLIRuntime {
+	return &CLIRuntime{Bin: "container", run: execCommand, stream: execStreamCommand}
+}
 
 func (r *CLIRuntime) bin() string {
 	if r.Bin != "" {
@@ -61,11 +73,42 @@ func (r *CLIRuntime) runner() commandFunc {
 	return execCommand
 }
 
+func (r *CLIRuntime) streamer() streamFunc {
+	if r.stream != nil {
+		return r.stream
+	}
+	return execStreamCommand
+}
+
 // execCommand is the default commandFunc, shelling out via os/exec.
 func execCommand(ctx context.Context, stdout, stderr io.Writer, name string, args ...string) (int, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), nil
+	}
+	return -1, err
+}
+
+// execStreamCommand is the default streamFunc, wiring stdin/stdout/stderr of an
+// os/exec process straight through. nil streams are left unset.
+func execStreamCommand(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) (int, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	if stdout != nil {
+		cmd.Stdout = stdout
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	}
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
@@ -215,6 +258,86 @@ func (r *CLIRuntime) Exec(ctx context.Context, id string, opts ExecOptions) (Exe
 		return res, fmt.Errorf("container exec: %w", err)
 	}
 	return res, nil
+}
+
+// ExecStream runs an interactive/attached command. It adds `-i` (always, so
+// stdin is wired) and `-t` (when a TTY is requested) to `container exec`, then
+// pipes the caller's streams straight through. Used by `shell` and the
+// SSH-over-exec ProxyCommand.
+func (r *CLIRuntime) ExecStream(ctx context.Context, id string, opts StreamOptions) (int, error) {
+	args := []string{subExec, "-i"}
+	if opts.TTY {
+		args = append(args, "-t")
+	}
+	if opts.Workdir != "" {
+		args = append(args, "-w", opts.Workdir)
+	}
+	for _, k := range sortedKeys(opts.Env) {
+		args = append(args, "-e", k+"="+opts.Env[k])
+	}
+	args = append(args, id)
+	args = append(args, opts.Cmd...)
+
+	var stdin io.Reader
+	if opts.Stdin != nil {
+		stdin = opts.Stdin
+	}
+	var stdout, stderr io.Writer
+	if opts.Stdout != nil {
+		stdout = opts.Stdout
+	}
+	if opts.Stderr != nil {
+		stderr = opts.Stderr
+	}
+	code, err := r.streamer()(ctx, stdin, stdout, stderr, r.bin(), args...)
+	if err != nil {
+		return code, fmt.Errorf("container exec (stream): %w", err)
+	}
+	return code, nil
+}
+
+// containerInspect mirrors the subset of `container inspect` JSON we rely on.
+// The exact schema is version-sensitive (like the subcommand names, D10): it is
+// isolated here so a `container` release change is a one-place fix.
+type containerInspect struct {
+	Status        string `json:"status"`
+	Configuration struct {
+		ID    string `json:"id"`
+		Image struct {
+			Reference string `json:"reference"`
+		} `json:"image"`
+	} `json:"configuration"`
+}
+
+// Inspect shells `container inspect <id>` and parses the JSON. A non-zero exit
+// (absent container, service down, bad reference) is surfaced as an error.
+func (r *CLIRuntime) Inspect(ctx context.Context, id string) (Container, error) {
+	res, err := r.capture(ctx, nil, nil, subInspect, id)
+	if err != nil {
+		return Container{}, fmt.Errorf("container inspect: %w", err)
+	}
+	if res.ExitCode != 0 {
+		return Container{}, fmt.Errorf("container inspect %q: exited %d: %s",
+			id, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	var docs []containerInspect
+	if err := json.Unmarshal([]byte(res.Stdout), &docs); err != nil {
+		return Container{}, fmt.Errorf("container inspect %q: parsing output: %w", id, err)
+	}
+	if len(docs) == 0 {
+		return Container{}, fmt.Errorf("container inspect %q: no container in output", id)
+	}
+	d := docs[0]
+	name := d.Configuration.ID
+	if name == "" {
+		name = id
+	}
+	return Container{
+		ID:      name,
+		Name:    name,
+		Image:   d.Configuration.Image.Reference,
+		Running: strings.EqualFold(d.Status, "running"),
+	}, nil
 }
 
 func (r *CLIRuntime) Stop(ctx context.Context, id string) error {

@@ -259,6 +259,108 @@ func TestExecCommandReal(t *testing.T) {
 	}
 }
 
+func TestCLIInspect(t *testing.T) {
+	const js = `[{"status":"running","configuration":{"id":"job-123","image":{"reference":"agentbox:latest"}}}]`
+	rec := &recorder{stdout: js, exit: 0}
+	r := &CLIRuntime{Bin: "container", run: rec.fn()}
+	c, err := r.Inspect(context.Background(), "job-123")
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !c.Running || c.Name != "job-123" || c.Image != "agentbox:latest" {
+		t.Errorf("inspect = %+v", c)
+	}
+	if !hasSeq(lastArgs(rec), "container", "inspect", "job-123") {
+		t.Errorf("argv must be `container inspect <id>`, got %v", lastArgs(rec))
+	}
+
+	// Stopped container: parsed, Running=false, no error.
+	rec2 := &recorder{stdout: `[{"status":"stopped","configuration":{"id":"x"}}]`, exit: 0}
+	r2 := &CLIRuntime{run: rec2.fn()}
+	if c, err := r2.Inspect(context.Background(), "x"); err != nil || c.Running {
+		t.Errorf("stopped: c=%+v err=%v", c, err)
+	}
+
+	// Non-zero exit (absent/service down) surfaces an error.
+	r3 := &CLIRuntime{run: (&recorder{exit: 1}).fn()}
+	if _, err := r3.Inspect(context.Background(), "gone"); err == nil {
+		t.Error("expected error for absent container")
+	}
+
+	// Malformed JSON surfaces an error.
+	r4 := &CLIRuntime{run: (&recorder{stdout: "not json", exit: 0}).fn()}
+	if _, err := r4.Inspect(context.Background(), "x"); err == nil {
+		t.Error("expected error for malformed inspect output")
+	}
+}
+
+// streamRecorder captures ExecStream argv (and confirms stdio is wired).
+type streamRecorder struct {
+	args     []string
+	exit     int
+	err      error
+	sawStdin bool
+}
+
+func (s *streamRecorder) fn() streamFunc {
+	return func(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) (int, error) {
+		s.args = append([]string{name}, args...)
+		s.sawStdin = stdin != nil
+		if stdout != nil && s.exit == 0 {
+			_, _ = stdout.Write([]byte("streamed"))
+		}
+		return s.exit, s.err
+	}
+}
+
+func TestCLIExecStream(t *testing.T) {
+	// Non-TTY (SSH tunnel): -i present, -t absent, stdin wired.
+	rec := &streamRecorder{exit: 7}
+	r := &CLIRuntime{Bin: "container", stream: rec.fn()}
+	var out bytes.Buffer
+	code, err := r.ExecStream(context.Background(), "vm1", StreamOptions{
+		Cmd:    []string{"/usr/sbin/sshd", "-i"},
+		Stdin:  strings.NewReader("data"),
+		Stdout: &out,
+	})
+	if err != nil {
+		t.Fatalf("ExecStream: %v", err)
+	}
+	if code != 7 {
+		t.Errorf("code = %d, want 7", code)
+	}
+	if !hasSeq(rec.args, "exec", "-i", "vm1", "/usr/sbin/sshd", "-i") {
+		t.Errorf("argv = %v", rec.args)
+	}
+	if hasSeq(rec.args, "-t") {
+		t.Errorf("non-TTY exec must not pass -t: %v", rec.args)
+	}
+	if !rec.sawStdin {
+		t.Error("stdin not wired through")
+	}
+
+	// TTY (interactive shell): -t present.
+	recT := &streamRecorder{}
+	rt := &CLIRuntime{stream: recT.fn()}
+	if _, err := rt.ExecStream(context.Background(), "vm2", StreamOptions{Cmd: []string{"bash"}, TTY: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasSeq(recT.args, "exec", "-i", "-t", "vm2", "bash") {
+		t.Errorf("tty argv = %v", recT.args)
+	}
+}
+
+func TestExecStreamCommandReal(t *testing.T) {
+	var out bytes.Buffer
+	code, err := execStreamCommand(context.Background(), strings.NewReader("hello"), &out, &out, "sh", "-c", "cat; exit 4")
+	if err != nil {
+		t.Fatalf("execStreamCommand: %v", err)
+	}
+	if code != 4 || !strings.Contains(out.String(), "hello") {
+		t.Errorf("code=%d out=%q", code, out.String())
+	}
+}
+
 func TestNewCLIRuntimeDefaults(t *testing.T) {
 	r := NewCLIRuntime()
 	if r.bin() != "container" || r.runner() == nil {

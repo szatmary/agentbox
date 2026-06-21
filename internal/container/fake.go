@@ -8,14 +8,15 @@ import (
 
 // Call records a single invocation of a Fake method, for assertions in tests.
 type Call struct {
-	Method  string // "Build", "ImageExists", "Run", "Exec", "Stop", "Remove"
-	ID      string // container id, for Exec/Stop/Remove
+	Method  string // "Build", "ImageExists", "Run", "Exec", "ExecStream", "Inspect", "Stop", "Remove"
+	ID      string // container id, for Exec/ExecStream/Inspect/Stop/Remove
 	Image   string // for Run/ImageExists
 	Tag     string // for Build
 	Cmd     []string
 	Env     map[string]string
 	Mounts  []Mount // for Run
-	Workdir string  // for Run/Exec
+	Workdir string  // for Run/Exec/ExecStream
+	TTY     bool    // for ExecStream
 }
 
 // Fake is an in-memory [Runtime] for tests. It records every call and lets a
@@ -39,6 +40,8 @@ type Fake struct {
 	ImageExistsFunc func(ctx context.Context, image string) (bool, error)
 	RunFunc         func(ctx context.Context, opts RunOptions) (string, error)
 	ExecFunc        func(ctx context.Context, id string, opts ExecOptions) (ExecResult, error)
+	ExecStreamFunc  func(ctx context.Context, id string, opts StreamOptions) (int, error)
+	InspectFunc     func(ctx context.Context, id string) (Container, error)
 	StopFunc        func(ctx context.Context, id string) error
 	RemoveFunc      func(ctx context.Context, id string) error
 }
@@ -152,6 +155,35 @@ func (f *Fake) Exec(ctx context.Context, id string, opts ExecOptions) (ExecResul
 		return f.ExecFunc(ctx, id, opts)
 	}
 	return ExecResult{ExitCode: 0}, nil
+}
+
+func (f *Fake) ExecStream(ctx context.Context, id string, opts StreamOptions) (int, error) {
+	f.record(Call{Method: "ExecStream", ID: id, Cmd: opts.Cmd, Env: opts.Env, Workdir: opts.Workdir, TTY: opts.TTY})
+	if f.ExecStreamFunc != nil {
+		return f.ExecStreamFunc(ctx, id, opts)
+	}
+	return 0, nil
+}
+
+func (f *Fake) Inspect(ctx context.Context, id string) (Container, error) {
+	f.record(Call{Method: "Inspect", ID: id})
+	if f.InspectFunc != nil {
+		return f.InspectFunc(ctx, id)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return Container{ID: id, Name: id, Running: f.running[id]}, nil
+}
+
+// SetRunning marks a container id/name running (or not) for Inspect. Tests use
+// it to make a run resolve to a live (or dead) container without a real VM.
+func (f *Fake) SetRunning(id string, running bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.running == nil {
+		f.running = map[string]bool{}
+	}
+	f.running[id] = running
 }
 
 func (f *Fake) Stop(ctx context.Context, id string) error {
