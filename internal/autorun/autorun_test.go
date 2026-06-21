@@ -240,6 +240,39 @@ func TestAutorunCooldownCancelled(t *testing.T) {
 	}
 }
 
+// TestLsRemoteArgsSeparator pins the `--` separator before the repo URL so a
+// crafted repo (e.g. "-x://evil") cannot be parsed by git as a flag. See S4.
+func TestLsRemoteArgsSeparator(t *testing.T) {
+	args := lsRemoteArgs("https://github.com/szatmary/go2110.git", "")
+	// `--` must appear and the repo must come strictly after it.
+	sep := -1
+	for i, a := range args {
+		if a == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 {
+		t.Fatalf("missing -- separator: %v", args)
+	}
+	if args[sep+1] != "https://github.com/szatmary/go2110.git" {
+		t.Fatalf("repo must immediately follow --: %v", args)
+	}
+	if args[len(args)-1] != "HEAD" {
+		t.Fatalf("default ref should be HEAD: %v", args)
+	}
+	// A '-'-leading repo stays an operand (after --), never a flag position.
+	args = lsRemoteArgs("-x://evil", "main")
+	for i := 0; i < sep+1; i++ {
+		if args[i] == "-x://evil" {
+			t.Fatalf("crafted repo appeared before --: %v", args)
+		}
+	}
+	if args[len(args)-2] != "-x://evil" || args[len(args)-1] != "main" {
+		t.Fatalf("crafted repo/ref placement wrong: %v", args)
+	}
+}
+
 func TestDefaultSleepReturnsImmediatelyForZero(t *testing.T) {
 	a := &Autorun{}
 	if err := a.sleep(context.Background(), 0); err != nil {

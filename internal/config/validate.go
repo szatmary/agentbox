@@ -3,8 +3,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// packageNameRE matches a safe Debian package name (optionally with an
+// apt version qualifier handled elsewhere). It deliberately forbids whitespace,
+// shell metacharacters, and newlines so an extra_packages entry cannot inject
+// extra Dockerfile/RUN commands. See S3.
+var packageNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_-]*$`)
 
 // Validate checks the config for actionable errors. It does not touch the
 // filesystem or network (the task file's existence is checked by the caller
@@ -45,8 +52,28 @@ func (c Config) Validate() error {
 
 	// A GitHub credential without a repo is harmless but a repo with github=none
 	// means the agent cannot push; warn via error only when autorun relies on it.
-	if c.Repo != "" && !strings.Contains(c.Repo, "://") && !strings.Contains(c.Repo, "@") {
-		errs = append(errs, fmt.Sprintf("repo %q does not look like a git URL", c.Repo))
+	if c.Repo != "" {
+		// Reject argument- and transport-injection vectors before the URL ever
+		// reaches `git clone`/`git ls-remote`. A leading '-' would be parsed as a
+		// flag; the `ext::` remote-helper transport runs an arbitrary command. See S4.
+		if strings.HasPrefix(c.Repo, "-") {
+			errs = append(errs, fmt.Sprintf("repo %q must not begin with '-' (would be parsed as a git flag)", c.Repo))
+		}
+		if strings.HasPrefix(strings.ToLower(c.Repo), "ext::") {
+			errs = append(errs, fmt.Sprintf("repo %q must not use the ext:: transport (arbitrary command execution)", c.Repo))
+		}
+		if !strings.Contains(c.Repo, "://") && !strings.Contains(c.Repo, "@") {
+			errs = append(errs, fmt.Sprintf("repo %q does not look like a git URL", c.Repo))
+		}
+	}
+
+	// extra_packages are interpolated into the image Dockerfile's apt-get install
+	// line; an unconstrained value injects arbitrary build commands. See S3.
+	for _, pkg := range c.Image.ExtraPackages {
+		if !packageNameRE.MatchString(pkg) {
+			errs = append(errs, fmt.Sprintf("image.extra_packages entry %q is not a valid package name "+
+				"(allowed: letters, digits, and . + _ -)", pkg))
+		}
 	}
 
 	if c.Autorun.PerRunWall.D() <= 0 {
@@ -60,10 +87,6 @@ func (c Config) Validate() error {
 	}
 	if c.Autorun.MaxRuns < 0 {
 		errs = append(errs, "autorun.max_runs must not be negative (0 = unlimited)")
-	}
-	if c.Repo == "" && c.Autorun.MaxNoProgress > 0 && c.Autorun.MaxRuns == 0 {
-		// Not fatal: documented in DECISIONS (D6). Autorun without a repo has no
-		// HEAD-based progress signal; it then relies on DONE/FAILED or max_runs.
 	}
 
 	if len(errs) > 0 {

@@ -16,15 +16,23 @@ type GitHeadProbe struct {
 	Ref string
 }
 
-// RemoteHead implements [HeadProbe].
-func (p GitHeadProbe) RemoteHead(ctx context.Context) (string, error) {
-	ref := p.Ref
+// lsRemoteArgs builds the `git ls-remote` argument vector. The `--` separator
+// stops git from interpreting a crafted repo value as a flag; config.Validate
+// also rejects '-'-leading and ext:: repos. See S4. Kept pure so the argv is
+// unit-tested without invoking real git.
+func lsRemoteArgs(repo, ref string) []string {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	out, err := exec.CommandContext(ctx, "git", "ls-remote", p.Repo, ref).Output()
+	return []string{"ls-remote", "--", repo, ref}
+}
+
+// RemoteHead implements [HeadProbe].
+func (p GitHeadProbe) RemoteHead(ctx context.Context) (string, error) {
+	args := lsRemoteArgs(p.Repo, p.Ref)
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
-		return "", fmt.Errorf("git ls-remote %s %s: %w", p.Repo, ref, err)
+		return "", fmt.Errorf("git ls-remote %s %s: %w", p.Repo, args[len(args)-1], err)
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {

@@ -133,6 +133,10 @@ func TestBuildSetup(t *testing.T) {
 			t.Errorf("setup missing %q in:\n%s", want, joined)
 		}
 	}
+	// S4: clone must use the `--` separator so a crafted repo can't be a flag.
+	if !strings.Contains(joined, "git clone -- ") {
+		t.Errorf("clone must use the -- separator:\n%s", joined)
+	}
 
 	// No creds, github=none, no repo => only the (absent) bits omitted.
 	inj2 := auth.Injection{GitName: "n", GitEmail: "e", GitHubSource: config.GitHubNone}

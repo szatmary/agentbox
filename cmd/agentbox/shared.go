@@ -93,8 +93,10 @@ func buildSetup(inj auth.Injection, repo string) [][]string {
 		setup = append(setup, []string{"sh", "-c", "gh auth setup-git >/dev/null 2>&1 || true"})
 	}
 	if repo != "" {
+		// The `--` separator stops git from interpreting a crafted repo value as
+		// a flag; config.Validate also rejects '-'-leading and ext:: repos. See S4.
 		setup = append(setup, []string{"sh", "-c",
-			"cd /work/workspace && if [ -z \"$(ls -A)\" ]; then git clone " + shellQuote(repo) + " .; fi"})
+			"cd /work/workspace && if [ -z \"$(ls -A)\" ]; then git clone -- " + shellQuote(repo) + " .; fi"})
 	}
 	return setup
 }
