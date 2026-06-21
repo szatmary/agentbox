@@ -16,6 +16,10 @@ func TestRenderDockerfileDefaults(t *testing.T) {
 	if !strings.Contains(out, "claude-code") {
 		t.Error("Dockerfile should install Claude Code")
 	}
+	// openssh-server/-client back SSH-over-exec attach (sshd -i + ssh-keygen).
+	if !strings.Contains(out, "openssh-server") || !strings.Contains(out, "openssh-client") {
+		t.Errorf("Dockerfile should install openssh-server/-client:\n%s", out)
+	}
 	if !strings.Contains(out, "ENTRYPOINT [\"sleep\"]") {
 		t.Error("Dockerfile should keep the VM alive with sleep")
 	}

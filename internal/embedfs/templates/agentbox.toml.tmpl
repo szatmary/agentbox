@@ -25,3 +25,7 @@ per_run_wall   = "3h"
 max_noprogress = 3     # stop after this many runs with no remote-HEAD change
 cooldown       = "30s"
 # max_runs     = 0     # optional hard cap on total runs (0 = unlimited)
+
+[attach]
+ssh = false          # true => install a per-run SSH key so `agentbox ssh`/
+                     # `attach --vscode` can reach the live VM over container exec

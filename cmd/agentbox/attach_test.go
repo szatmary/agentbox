@@ -29,6 +29,39 @@ func makeRunWithKey(t *testing.T, runsDir, name, id string, withKey bool) string
 	return r.Root
 }
 
+func TestAttachSetup(t *testing.T) {
+	runDir := filepath.Join(t.TempDir(), "job-20260101T000000Z")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled: no key, no setup.
+	cmds, err := attachSetup(runDir, false)
+	if err != nil || cmds != nil {
+		t.Fatalf("disabled: cmds=%v err=%v", cmds, err)
+	}
+	if fileExists(attach.PrivateKeyPath(runDir)) {
+		t.Error("disabled attach must not generate a key")
+	}
+
+	// Enabled: key generated 0600, setup installs authorized_keys.
+	cmds, err = attachSetup(runDir, true)
+	if err != nil {
+		t.Fatalf("enabled: %v", err)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("expected one setup command, got %d", len(cmds))
+	}
+	info, err := os.Stat(attach.PrivateKeyPath(runDir))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("private key missing or wrong perm: %v %v", info, err)
+	}
+	script := strings.Join(cmds[0], " ")
+	if !strings.Contains(script, "authorized_keys") || !strings.Contains(script, "ssh-keygen -A") {
+		t.Errorf("setup missing key install:\n%s", script)
+	}
+}
+
 func TestRunSSHProxyCmd(t *testing.T) {
 	runsDir := filepath.Join(t.TempDir(), "runs")
 	runDir := makeRunWithKey(t, runsDir, "job", "20260101T000000Z", true)

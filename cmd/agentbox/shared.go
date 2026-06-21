@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/szatmary/agentbox/internal/attach"
 	"github.com/szatmary/agentbox/internal/auth"
 	"github.com/szatmary/agentbox/internal/config"
 	"github.com/szatmary/agentbox/internal/container"
@@ -116,6 +117,23 @@ func buildSetup(inj auth.Injection, repo string) [][]string {
 			"cd /work/workspace && if [ -z \"$(ls -A)\" ]; then git clone -- " + shellQuote(repo) + " .; fi"})
 	}
 	return setup
+}
+
+// attachSetup, when SSH attach is enabled, generates the run's ephemeral
+// ed25519 keypair (private key 0600 in the run dir) and returns the one-time
+// in-VM setup command that installs the public key into the agent's
+// authorized_keys and generates host keys. The private key never leaves the
+// host; only the (non-secret) public key reaches the VM. Returns nil when SSH
+// attach is disabled.
+func attachSetup(runDir string, enabled bool) ([][]string, error) {
+	if !enabled {
+		return nil, nil
+	}
+	pubLine, err := attach.EnsureKeyPair(runDir)
+	if err != nil {
+		return nil, err
+	}
+	return [][]string{attach.AuthorizedKeysSetup(pubLine)}, nil
 }
 
 // stageSecrets writes the injected secrets (env assignments + optional keychain

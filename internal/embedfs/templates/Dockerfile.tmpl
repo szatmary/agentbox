@@ -12,12 +12,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
 # Base tooling: certs, git, curl, jq, sudo, plus any job-specific packages.
+# openssh-server/-client provide sshd + ssh-keygen for SSH-over-exec attach.
+# We do NOT enable any sshd service: it is only ever launched on demand in
+# inetd mode (`sshd -i`) through `container exec` by `agentbox ssh-proxy`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git jq sudo unzip xz-utils \
+        openssh-server openssh-client \
 {{- range .ExtraPackages}}
         {{.}} \
 {{- end}}
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd
 
 # Node.js LTS + Claude Code CLI.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

@@ -95,6 +95,15 @@ func executeRunWith(ctx context.Context, out io.Writer, runsDir string, cfg conf
 	}
 	defer cleanup()
 
+	setup := buildSetup(inj, cfg.Repo)
+	// When SSH attach is enabled, generate the per-run keypair and append the
+	// authorized_keys/host-key install to the one-time setup commands.
+	attachCmds, err := attachSetup(r.Root, cfg.Attach.SSH)
+	if err != nil {
+		return supervisor.Result{}, err
+	}
+	setup = append(setup, attachCmds...)
+
 	sup := supervisor.New(rt, supervisor.Options{
 		Image:       image,
 		Name:        cfg.Name + "-" + r.ID,
@@ -104,7 +113,7 @@ func executeRunWith(ctx context.Context, out io.Writer, runsDir string, cfg conf
 		MaxIters:    cfg.Guards.MaxIters,
 		MaxTurns:    cfg.Guards.MaxTurns,
 		Mounts:      append(mountsFor(r), secretsMount),
-		Setup:       buildSetup(inj, cfg.Repo),
+		Setup:       setup,
 		SecretsFile: secretsEnvFileInVM,
 		LogOut:      r.LogWriter(),
 	})

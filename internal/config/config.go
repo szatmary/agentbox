@@ -40,6 +40,16 @@ type Config struct {
 	Auth    Auth    `toml:"auth"`
 	Image   Image   `toml:"image"`
 	Autorun Autorun `toml:"autorun"`
+	Attach  Attach  `toml:"attach"`
+}
+
+// Attach configures the "attach + observe" layer for a run.
+type Attach struct {
+	// SSH enables SSH-over-exec: at run start agentbox generates a per-run
+	// ed25519 keypair and installs the public key into the VM's authorized_keys
+	// (and generates host keys), so `agentbox ssh`/`attach`/VSCode Remote-SSH can
+	// reach the VM through a `container exec` ProxyCommand. No ports are opened.
+	SSH bool `toml:"ssh"`
 }
 
 // Guards bound a single supervised run.
