@@ -12,10 +12,26 @@ Living log of what is done. Newest first. Read this + ROADMAP.md on each fresh r
 - [x] 7. `cmd/agentbox` subcommands
 - [x] 8. README + goreleaser + example job
 
-## Status: COMPLETE
-All 8 roadmap items implemented. `go build ./... && go vet ./... && go test ./...` is
-green on linux/arm64 (this VM) and cross-compiles for darwin & linux on amd64+arm64.
-Every subcommand exists; the README is complete.
+## Status: COMPLETE + HARDENED
+All 8 roadmap items implemented, then an independent security/correctness audit was
+addressed end-to-end. See HARDENING.md for the per-item checklist (all boxes checked).
+`go build ./... && go vet ./... && go test ./...` is green on linux/arm64 (this VM).
+
+## Hardening log (newest first)
+- H1+H2: removed false DECISIONS redaction claim; `init` scaffolds `.gitignore` (.agentbox/).
+- O1+O2: autorun honors `--max-wall` (more-restrictive budget); `stop` does a Signal(0)
+  liveness check before SIGTERM; detached child removes its pidfile; autorun clears stale
+  `.stop` markers on startup.
+- S1+S2+H3: secrets routed through a sourced 0600 env file (never argv); cred blob staged
+  outside the control dir and removed after teardown; `executeRun` takes an injected
+  Runtime+resolver (wiring test); control dir 0700.
+- C2+C3+O3: supervisor inspects claude exit code (backoff + distinct StatusClaudeError);
+  control reads distinguish "absent" (cat exit 1) from VM-unreachable; per-exec deadline
+  from remaining wall budget interrupts a hung claude.
+- C4: explicit uid/gid 0 honored (nil = unset sentinel via *int).
+- S3+S4: extra_packages validated against a strict regex; repo URLs reject '-'-leading /
+  ext:: and use a `--` separator on clone/ls-remote.
+- C1: ImageExists uses `container image inspect`; exit 1 = absent, other non-zero surfaced.
 
 ## Log (newest first)
 - Step 8: full README (install/usage/macOS-only caveat/Docker-backend note),

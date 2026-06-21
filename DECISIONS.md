@@ -66,10 +66,35 @@ prompts, so interactive approval would deadlock the loop. The blast radius is th
 sandbox VM, which is stopped and removed at the end of every run. This is the same
 posture as the bash harness agentbox generalizes.
 
+## D11 — Hardening: secrets, failure paths, CLI-vs-reality (audit response)
+An independent audit found defects the fake-based tests were structurally blind to. Key
+decisions made while fixing them (full list in HARDENING.md):
+- **Secrets never in argv (S1/S2).** All secret env vars and the keychain OAuth blob go
+  into a 0600 file staged in a dir *outside* the bind-mounted control dir, mounted
+  read-only, sourced (`set -a; . file`) before every setup/claude exec, and removed after
+  teardown. Nothing secret reaches `container run`/`exec` argv.
+- **Input validation (S3/S4).** `extra_packages` must match
+  `^[A-Za-z0-9][A-Za-z0-9.+_-]*$`; repo URLs reject `-`-leading and `ext::` and pass a
+  `--` separator to git, closing flag/transport injection.
+- **Honest failure status (C2/C3).** A claude that exits non-zero with no STATUS is no
+  longer a benign guard trip: the supervisor backs off and aborts with `claude_error`
+  after `MaxClaudeErrors`. A control read that fails for any reason other than cat's
+  exit-1 ("absent") aborts (dead VM), instead of looping.
+- **Exec is wall-bounded (O3).** Each claude exec gets a ctx deadline derived from the
+  remaining wall budget so a hung agent is interrupted within the iteration.
+- **uid 0 is valid (C4).** `DockerfileData.HostUID/HostGID` are `*int`; nil means unset
+  (defaults to 1000), an explicit 0 is honored so root/CI bind-mount ownership is correct.
+- **Detach/stop lifecycle (O2).** `stop` does a `Signal(0)` liveness check before SIGTERM
+  (never signals a reused PID) and removes stale pidfiles; the detached child removes its
+  pidfile on exit; autorun consumes stale `.stop` markers at startup.
+- **Testability (H3).** `executeRun` delegates to `executeRunWith(rt, resolver)` so the
+  full config→auth→supervisor wiring is exercised with fakes that return non-zero exits
+  and dead-VM conditions; control dir is 0700.
+
 ## D10 — `container` CLI shelling and version drift
 `internal/container.CLIRuntime` shells out to Apple's `container` CLI. Subcommand
 names live in named constants (`build`, `run`, `exec`, `stop`, `delete`,
-`images inspect`) so they can be adjusted for a given `container` release in one
+`image inspect`) so they can be adjusted for a given `container` release in one
 place. The command runner is an injectable `commandFunc`, so argument construction
 is unit-tested without invoking the real binary; the real `execCommand` path is
 covered using `/bin/sh`. `agentbox doctor` surfaces a clear message if `container`
