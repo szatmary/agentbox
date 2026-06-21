@@ -57,6 +57,60 @@ func TestInitWritesScaffold(t *testing.T) {
 	}
 }
 
+// TestInitScaffoldsGitignore covers H2: init must ensure .agentbox/ is ignored,
+// creating .gitignore if needed and appending without clobbering existing entries.
+func TestInitScaffoldsGitignore(t *testing.T) {
+	// Fresh dir: .gitignore created with the entry.
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if _, err := execRoot(t, "init", "--name", "go2110"); err != nil {
+		t.Fatal(err)
+	}
+	gi := filepath.Join(dir, ".gitignore")
+	b, err := os.ReadFile(gi)
+	if err != nil {
+		t.Fatalf("init did not create .gitignore: %v", err)
+	}
+	if !strings.Contains(string(b), ".agentbox/") {
+		t.Errorf(".gitignore missing .agentbox/:\n%s", string(b))
+	}
+
+	// Existing .gitignore: entry appended, prior content preserved, no dupes.
+	dir2 := t.TempDir()
+	t.Chdir(dir2)
+	gi2 := filepath.Join(dir2, ".gitignore")
+	if err := os.WriteFile(gi2, []byte("node_modules/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execRoot(t, "init", "--name", "x"); err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := os.ReadFile(gi2)
+	if !strings.Contains(string(b2), "node_modules/") || !strings.Contains(string(b2), ".agentbox/") {
+		t.Errorf("append failed, got:\n%s", string(b2))
+	}
+	// Idempotent: a second init does not duplicate the entry.
+	if _, err := execRoot(t, "init", "--name", "x"); err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := os.ReadFile(gi2)
+	if n := strings.Count(string(b3), ".agentbox/"); n != 1 {
+		t.Errorf(".agentbox/ appears %d times, want 1:\n%s", n, string(b3))
+	}
+}
+
+// TestDecisionsNoFalseRedactionClaim covers H1: DECISIONS.md must not claim a
+// redaction feature that does not exist (doc-vs-code lie).
+func TestDecisionsNoFalseRedactionClaim(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "DECISIONS.md"))
+	if err != nil {
+		t.Fatalf("reading DECISIONS.md: %v", err)
+	}
+	if strings.Contains(string(b), "Loggers redact known secret keys") {
+		t.Error("DECISIONS.md still makes the unimplemented 'loggers redact' claim")
+	}
+}
+
 func TestStatusListsRuns(t *testing.T) {
 	runsDir := filepath.Join(t.TempDir(), "runs")
 	done, _ := run.Create(runsDir, "job", "20260101T000000Z")

@@ -46,8 +46,12 @@ surprising.
 
 ## D7 — Secrets are one-way and never logged
 `internal/auth` resolves a Claude credential and a GitHub token + git identity into an
-`Injection` (env vars / files) pushed into the VM. Credential *values* are never written
-to logs or stdout; only their source/kind is reported. Loggers redact known secret keys.
+`Injection` (env vars / files) pushed into the VM. Credential *values* are never passed
+to a logger or written to stdout; only their source/kind is reported. Secret values are
+also kept out of process argv: they are written to a 0600 env file (staged outside the
+mounted control dir and removed after teardown) and sourced inside the VM, rather than
+injected as `container run -e KEY=VAL` (which would be visible via `ps`/`container
+inspect`). See HARDENING S1/S2.
 
 ## D8 — Auth source selection
 `auth.claude ∈ {keychain, api_key, token}`: keychain reads the macOS keychain item
