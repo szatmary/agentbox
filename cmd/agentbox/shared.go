@@ -173,3 +173,17 @@ func shellQuote(s string) string {
 // runsBase returns the directory holding detached pid/log files (the parent of
 // the runs directory).
 func runsBase(runsDir string) string { return filepath.Dir(runsDir) }
+
+// resolveRun maps a run reference to its run directory. ref may be a run
+// directory path, a full run-dir name ("<job>-<id>") under runsDir, or a job
+// name (in which case the most recent run for that job is chosen). The run-dir
+// base name is also the live container name (see internal/observe).
+func resolveRun(runsDir, ref string) (string, error) {
+	if dir, ok := resolveRunDir(runsDir, ref); ok {
+		return dir, nil
+	}
+	if dir, ok := latestRunFor(runsDir, ref); ok {
+		return dir, nil
+	}
+	return "", fmt.Errorf("no run matching %q under %s", ref, runsDir)
+}
