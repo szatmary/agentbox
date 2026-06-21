@@ -54,3 +54,10 @@ to logs or stdout; only their source/kind is reported. Loggers redact known secr
 `Claude Code-credentials` (an OAuth blob); `api_key` reads `ANTHROPIC_API_KEY`; `token`
 reads `CLAUDE_CODE_OAUTH_TOKEN`. `auth.github ∈ {gh, pat, none}`: `gh` shells `gh auth
 token`; `pat` reads `GITHUB_TOKEN`/`GH_TOKEN`; `none` injects no GitHub credential.
+
+## D9 — `--dangerously-skip-permissions` inside the sandbox
+The supervised `claude` runs with `--dangerously-skip-permissions`. The agent is
+fully autonomous inside a disposable microVM with no human to answer permission
+prompts, so interactive approval would deadlock the loop. The blast radius is the
+sandbox VM, which is stopped and removed at the end of every run. This is the same
+posture as the bash harness agentbox generalizes.

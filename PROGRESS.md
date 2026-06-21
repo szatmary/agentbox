@@ -6,7 +6,7 @@ Living log of what is done. Newest first. Read this + ROADMAP.md on each fresh r
 - [x] 1. Scaffold + CI + `container.Runtime` + fake
 - [x] 2. `internal/config` + `internal/run`
 - [x] 3. `internal/auth`
-- [ ] 4. `internal/supervisor`
+- [x] 4. `internal/supervisor`
 - [ ] 5. `internal/autorun`
 - [ ] 6. `internal/container` real impl + `internal/embedfs`
 - [ ] 7. `cmd/agentbox` subcommands
