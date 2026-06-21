@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+# agentbox sandbox image (rendered from the embedded template).
+#
+# Build args let agentbox match the host user's UID/GID (so bind-mounted files
+# are owned correctly) and append extra OS packages/toolchains for the job.
+FROM {{.BaseImage}}
+
+ARG HOST_UID={{.HostUID}}
+ARG HOST_GID={{.HostGID}}
+ARG USERNAME={{.Username}}
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+# Base tooling: certs, git, curl, jq, sudo, plus any job-specific packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git jq sudo unzip xz-utils \
+{{- range .ExtraPackages}}
+        {{.}} \
+{{- end}}
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js LTS + Claude Code CLI.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh) from the official apt repository.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# A non-root user matching the host UID/GID, with passwordless sudo.
+RUN if ! getent group "${HOST_GID}" >/dev/null; then groupadd -g "${HOST_GID}" "${USERNAME}"; fi \
+    && useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash "${USERNAME}" \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
+    && mkdir -p /work/workspace /work/control /work/output \
+    && chown -R "${HOST_UID}:${HOST_GID}" /work
+
+USER ${USERNAME}
+WORKDIR /work/workspace
+ENV HOME=/home/${USERNAME}
+
+# The supervisor keeps the VM alive and drives `claude` via `container exec`.
+ENTRYPOINT ["sleep"]
+CMD ["infinity"]

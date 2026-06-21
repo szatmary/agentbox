@@ -61,3 +61,12 @@ fully autonomous inside a disposable microVM with no human to answer permission
 prompts, so interactive approval would deadlock the loop. The blast radius is the
 sandbox VM, which is stopped and removed at the end of every run. This is the same
 posture as the bash harness agentbox generalizes.
+
+## D10 — `container` CLI shelling and version drift
+`internal/container.CLIRuntime` shells out to Apple's `container` CLI. Subcommand
+names live in named constants (`build`, `run`, `exec`, `stop`, `delete`,
+`images inspect`) so they can be adjusted for a given `container` release in one
+place. The command runner is an injectable `commandFunc`, so argument construction
+is unit-tested without invoking the real binary; the real `execCommand` path is
+covered using `/bin/sh`. `agentbox doctor` surfaces a clear message if `container`
+or its service is unavailable.

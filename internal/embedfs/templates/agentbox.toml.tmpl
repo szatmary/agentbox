@@ -1,0 +1,27 @@
+# agentbox job configuration. See `agentbox --help` and the README for details.
+
+name = "{{.Name}}"
+# repo is optional; omit it to run a job with no git remote.
+# repo = "https://github.com/you/your-repo.git"
+task = "task.md"
+
+[guards]
+max_wall  = "3h"   # wall-clock budget for one supervised run
+max_iters = 500    # max resume iterations per run
+max_turns = 200    # max agent turns per individual claude call
+
+[model]
+name = ""          # empty = account default (e.g. "claude-opus-4-8")
+
+[auth]
+claude = "keychain"  # keychain | api_key | token
+github = "gh"        # gh | pat | none
+
+[image]
+extra_packages = []  # extra OS packages to bake into the sandbox image
+
+[autorun]
+per_run_wall   = "3h"
+max_noprogress = 3     # stop after this many runs with no remote-HEAD change
+cooldown       = "30s"
+# max_runs     = 0     # optional hard cap on total runs (0 = unlimited)
