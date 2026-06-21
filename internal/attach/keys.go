@@ -118,8 +118,8 @@ func AuthorizedKeysSetup(pubLine string) []string {
 	q := shellSingleQuote(pubLine)
 	script := strings.Join([]string{
 		"set -e",
-		"sudo ssh-keygen -A",         // generate /etc/ssh/ssh_host_* if absent
-		"sudo mkdir -p /run/sshd",    // sshd privilege-separation dir
+		"sudo ssh-keygen -A",      // generate /etc/ssh/ssh_host_* if absent
+		"sudo mkdir -p /run/sshd", // sshd privilege-separation dir
 		`mkdir -p "$HOME/.ssh"`,
 		`chmod 700 "$HOME/.ssh"`,
 		// Append the key only if it is not already present (idempotent on resume).

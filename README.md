@@ -16,6 +16,10 @@ agentbox doctor      # check prerequisites
 agentbox build       # build the sandbox image
 agentbox run         # one bounded, self-resuming run
 agentbox autorun     # relaunch until the job converges
+
+agentbox shell <run>     # interactive shell in a live run's VM
+agentbox attach <run> --vscode   # open the run's workspace in VSCode (Remote-SSH)
+agentbox mcp             # serve live runs to other AI agents over MCP
 ```
 
 ---
@@ -129,6 +133,104 @@ guard trips. This is exactly the protocol the original bash harness used.
 
 ---
 
+## Attach & monitor a live run
+
+A run is autonomous, but you don't have to fly blind. agentbox can **exec into and
+observe a running VM** — for humans (an interactive shell or VSCode) and for other AI
+agents (MCP). Inspection is read-mostly and built on the same `container exec` transport
+the supervisor already uses.
+
+### Why everything rides on `container exec`
+
+On this Apple `container` setup, host→VM direct networking (`--publish`, dialing the VM
+IP) is unreliable, but `container exec <vm> …` works. So **every attach path rides on
+`exec`** — including SSH, which is tunneled through a `ProxyCommand` rather than by opening
+a port. Nothing listens on the VM IP; no ports are published. A run's container is named
+after its run directory (`<job>-<id>`), so a run name resolves deterministically to its
+live container — agentbox only confirms it is actually running. (See
+[DECISIONS.md](DECISIONS.md) D12–D14.)
+
+### Quick poke: `agentbox shell`
+
+```sh
+agentbox shell my-job                 # interactive bash in the latest run's VM
+agentbox shell my-job -- git log -5   # or run a one-off command
+```
+
+This is a direct `container exec -it` — no SSH, nothing to configure. Great for a quick
+look. For editors and richer tooling, use SSH.
+
+### Humans: VSCode over Remote-SSH
+
+Enable SSH for the job (off by default):
+
+```toml
+[attach]
+ssh = true
+```
+
+At run start agentbox then generates an **ephemeral per-run ed25519 keypair** (private key
+`0600` in the run dir, never mounted into the VM), installs the public key into the VM's
+`authorized_keys`, and generates host keys — all over `exec`. Now:
+
+```sh
+agentbox ssh my-job          # install an ~/.ssh/config Host block for the run
+ssh agentbox-my-job          # …and connect (tunneled through container exec)
+
+agentbox attach my-job --vscode   # or jump straight into VSCode Remote-SSH
+```
+
+`agentbox ssh` writes a `Host agentbox-<run>` block whose `ProxyCommand` is
+`agentbox ssh-proxy <run>` — a hidden subcommand that resolves the live VM and pipes
+`sshd -i` (inetd mode) over `container exec`. Because the tunnel decouples `~/.ssh/config`
+from the per-run container name, your editor just sees a stable host alias. Use
+`agentbox ssh my-job --print` to inspect the block without installing it.
+
+> Per-run host keys are ephemeral, so the generated block sets
+> `StrictHostKeyChecking no` / `UserKnownHostsFile /dev/null`. That is safe here precisely
+> because the "network" is a local `exec` pipe, not an exposed socket.
+
+### AI agents: the MCP server
+
+```sh
+agentbox mcp                 # stdio transport (for `claude mcp add`, etc.)
+agentbox mcp --http          # HTTP transport on 127.0.0.1:7337 (localhost only)
+```
+
+The server exposes the observe layer as MCP tools so an external Claude can watch and
+steer live runs:
+
+| Tool | What it does |
+| --- | --- |
+| `list_runs` | All runs with STATUS + live state. |
+| `get_status` | One run's liveness + STATUS sentinel. |
+| `tail_log` | Tail of `logs/run.log`. |
+| `list_files` / `read_file` | `ls`/`cat` inside the live VM. |
+| `git_status` / `git_diff` | Git state of the working tree. |
+| `exec` | Run a command inside the live VM. |
+| `stop` | Request a graceful stop (writes `STOP`). |
+
+Register it with another Claude, for example:
+
+```sh
+claude mcp add agentbox -- agentbox mcp
+```
+
+### Trust model
+
+- **The `exec` and `shell` paths run commands inside *your own* sandbox VM** — the same
+  blast radius as the agent itself, which is already running `--dangerously-skip-permissions`
+  in a disposable microVM. Attaching grants no privilege the run doesn't already have.
+- **The SSH private key is per-run, `0600`, and lives only on the host** in the run dir
+  (never bind-mounted, never logged, removed when you delete the run). Only the public key
+  is installed into the VM. This reuses agentbox's existing
+  [secret-handling discipline](HARDENING.md) (no secrets in argv or logs).
+- **`agentbox mcp --http` binds to `127.0.0.1` by default.** The `exec` tool can run
+  arbitrary commands in the sandbox, so do **not** bind it to a public interface without
+  understanding that you are handing shell access to anyone who can reach the port.
+
+---
+
 ## Configuration (`agentbox.toml`)
 
 ```toml
@@ -156,6 +258,9 @@ per_run_wall   = "3h"
 max_noprogress = 3   # stop after this many runs with no remote-HEAD change
 cooldown       = "30s"
 # max_runs     = 0   # optional hard cap on total runs (0 = unlimited)
+
+[attach]
+ssh = false          # true => install a per-run SSH key for `agentbox ssh`/`attach`
 ```
 
 Durations are Go duration strings (`"3h"`, `"30s"`, `"90m"`). Validation is strict and
@@ -191,9 +296,13 @@ Credentials are injected **one-way** into the VM and are **never logged**; only 
 | `agentbox build [job.toml]` | Build/rebuild the sandbox image from the embedded Dockerfile (host UID/GID build args, `extra_packages`). `--tag`, `--no-cache`, `--base-image`. |
 | `agentbox run [job.toml]` | One bounded, self-resuming run. `--detach` to background. Flags override config. |
 | `agentbox autorun [job.toml]` | Continuous relaunch loop. `--detach`. |
-| `agentbox status` | List runs under `--runs-dir` and their STATUS. |
+| `agentbox status` | List runs under `--runs-dir` and their STATUS. `--live` probes each VM's liveness. |
 | `agentbox logs <run>` | Print a run's `logs/run.log`; `-f` to follow. |
 | `agentbox stop <job\|run>` | Write the STOP file and signal any detached process. |
+| `agentbox shell <run> [-- cmd…]` | Interactive shell (or one-off command) in a live run's VM via `container exec -it`. |
+| `agentbox ssh <run>` | Install (or `--print`) an `~/.ssh/config` Host block reaching the run over a `container exec` ProxyCommand. |
+| `agentbox attach <run> --vscode` | Configure SSH and open the run's workspace in VSCode Remote-SSH. |
+| `agentbox mcp [--stdio\|--http]` | Serve the observe layer to AI agents over MCP. |
 
 Run directories default to `.agentbox/runs/<name>-<timestamp>/`; override with
 `--runs-dir`.

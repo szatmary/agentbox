@@ -99,3 +99,55 @@ place. The command runner is an injectable `commandFunc`, so argument constructi
 is unit-tested without invoking the real binary; the real `execCommand` path is
 covered using `/bin/sh`. `agentbox doctor` surfaces a clear message if `container`
 or its service is unavailable.
+
+## D12 — Attach + observe rides entirely on `container exec`
+The "attach + observe" layer (humans via SSH/VSCode, AI agents via MCP) never opens a
+port or dials the VM IP. On this Apple `container` setup, host→VM direct TCP and
+`--publish` are flaky, but `container exec` is reliable (verified). So every path —
+including SSH — rides on `exec`. SSH is tunneled by a `ProxyCommand`
+(`agentbox ssh-proxy <run>`) that runs `sshd -i` (inetd mode) inside the VM over a piped
+`exec`; nothing listens on the VM IP. This decision is grounded and not relitigated.
+
+The single seam stays the only seam: the `container.Runtime` interface gains exactly two
+methods — `Inspect` (resolve a run name → live container + liveness; CLIRuntime parses
+`container inspect` JSON, isolated like the subcommand constants per D10) and `ExecStream`
+(stdin + optional TTY, no buffering — for the interactive `shell` and the SSH tunnel).
+Both are faked, so `shell`/`ssh-proxy` argv and run→container resolution are asserted
+without a real VM.
+
+## D13 — Run name ⇄ live container is deterministic
+A supervised run starts its VM with `--name <job>-<id>`, which is exactly the run-dir base
+name. So a run resolves to its live container by *name*; the attach/observe code only has
+to confirm the container is running (via `Inspect`), never guess an id. `internal/observe`
+holds the host run dir (for the STATUS sentinel and `logs/run.log`, read directly so
+status survives VM teardown) and the Runtime (for in-VM `ls`/`cat`/`git`/arbitrary exec).
+Every VM-touching method resolves first and returns `ErrNotRunning` when the VM is down.
+
+## D14 — SSH key handling, sshd-as-root, and ephemeral host keys
+- **Ephemeral per-run ed25519 keypair.** Generated at run start when `[attach] ssh = true`,
+  written `0600` into `<run>/ssh/` (a sibling of the bind-mounted dirs, so the private key
+  is never visible inside the VM). Only the *public* key is installed into the VM's
+  `authorized_keys` (via an `exec` setup command — public keys are not secret). OpenSSH key
+  marshaling uses `golang.org/x/crypto/ssh` (the one added dependency).
+- **`sshd -i` runs as root via `sudo`.** The image's default user is the non-root `agent`,
+  but sshd needs root for host keys and privilege separation. `agent` already has
+  passwordless sudo in the image, so the ProxyCommand runs `sudo /usr/sbin/sshd -i -e`.
+  Host keys + `/run/sshd` are created in the same one-time setup (`ssh-keygen -A`). No
+  network sshd is ever started — inetd-over-exec only.
+- **Host-key checking is off by design.** Per-run host keys are throwaway and reached only
+  through the local `exec` pipe, so the generated `~/.ssh/config` block sets
+  `StrictHostKeyChecking no` / `UserKnownHostsFile /dev/null`. There is no stable host
+  identity to pin and nothing is network-exposed.
+- **ProxyCommand carries an absolute `--runs-dir`.** ssh invokes the ProxyCommand from an
+  arbitrary cwd, so the run dir is resolved to an absolute path when the Host block is
+  written.
+
+## D15 — MCP server is a hand-rolled JSON-RPC 2.0 subset
+Rather than take an MCP-library dependency, `internal/mcp` implements just the methods MCP
+needs — `initialize`, `tools/list`, `tools/call`, and notifications — over stdio
+(newline-delimited JSON) and a minimal JSON-RPC-over-HTTP transport. This keeps the server
+small, dependency-free, and fully table-testable against the fake runtime. Tools are thin
+wrappers over `internal/observe`. Tool failures are returned as `isError` results (so the
+model can read and react), while protocol misuse yields JSON-RPC errors. The `exec` tool
+runs in the user's own sandbox, so `--http` binds to `127.0.0.1` by default (trust model in
+the README).

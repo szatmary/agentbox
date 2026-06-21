@@ -17,10 +17,10 @@ import (
 // adjusted for a given `container` version without touching call sites. See
 // DECISIONS D10.
 const (
-	subBuild  = "build"
-	subRun    = "run"
-	subExec   = "exec"
-	subStop   = "stop"
+	subBuild   = "build"
+	subRun     = "run"
+	subExec    = "exec"
+	subStop    = "stop"
 	subDelete  = "delete"
 	subImage   = "image"   // used as: container image inspect <ref>
 	subInspect = "inspect" // used as: container inspect <id>

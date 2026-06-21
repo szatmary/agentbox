@@ -59,5 +59,9 @@ brews:
       agentbox's runtime is macOS-only: it requires Apple `container`
       (macOS 26+, Apple silicon) and reads Claude credentials from the keychain.
 
+      Attach & monitor a live run with `agentbox shell|ssh|attach --vscode`
+      (SSH is tunneled over `container exec`; no ports are opened) or serve
+      runs to other agents with `agentbox mcp`. See the README.
+
 release:
   prerelease: auto

@@ -30,8 +30,12 @@ func objSchema(props map[string]any, required ...string) map[string]any {
 	return s
 }
 
-func strProp(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
-func intProp(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
+func strProp(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc}
+}
+func intProp(desc string) map[string]any {
+	return map[string]any{"type": "integer", "description": desc}
+}
 func boolProp(desc string) map[string]any {
 	return map[string]any{"type": "boolean", "description": desc}
 }

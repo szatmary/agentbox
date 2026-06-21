@@ -12,10 +12,27 @@ Living log of what is done. Newest first. Read this + ROADMAP.md on each fresh r
 - [x] 7. `cmd/agentbox` subcommands
 - [x] 8. README + goreleaser + example job
 
-## Status: COMPLETE + HARDENED
-All 8 roadmap items implemented, then an independent security/correctness audit was
-addressed end-to-end. See HARDENING.md for the per-item checklist (all boxes checked).
-`go build ./... && go vet ./... && go test ./...` is green on linux/arm64 (this VM).
+## Status: COMPLETE + HARDENED + ATTACH/OBSERVE LAYER
+All 8 original roadmap items implemented, then an independent security/correctness audit
+was addressed end-to-end (HARDENING.md), then the **attach + observe layer** was added
+(ATTACH.md). `go build ./... && go vet ./... && go test ./...` is green on linux/arm64.
+
+## Attach + observe log (newest first) — see ATTACH.md for the design
+- A6: README "Attach & monitor" section (shell/SSH/VSCode/MCP walkthroughs, exec-transport
+  rationale, trust model); command table + toml example + goreleaser caveats updated;
+  DECISIONS D12–D15.
+- A5: internal/mcp — hand-rolled JSON-RPC 2.0 subset over stdio + HTTP exposing 9 observe
+  tools (list_runs/get_status/tail_log/list_files/read_file/git_status/git_diff/exec/stop);
+  `agentbox mcp` (--http defaults to localhost). Table-tested vs the fake.
+- A4: image gains openssh-server/-client + /run/sshd; `[attach] ssh` config flag; run path
+  generates the per-run keypair and appends the authorized_keys/host-key install to setup.
+- A3: internal/attach — ephemeral ed25519 keygen (priv 0600, x/crypto/ssh), authorized_keys
+  install, ~/.ssh/config Host-block render+install, RunSSHProxy; `ssh-proxy`/`ssh`/`attach`
+  commands (ProxyCommand carries an absolute --runs-dir).
+- A2: `agentbox shell <run>` (container exec -it via ExecStream) + `status --live`.
+- A1: container.Runtime grows Inspect + ExecStream (Fake + CLIRuntime); internal/observe
+  read/exec layer (Status/TailLog/ListFiles/ReadFile/GitStatus/GitDiff/Exec), run→container
+  resolution by name with ErrNotRunning.
 
 ## Hardening log (newest first)
 - H1+H2: removed false DECISIONS redaction claim; `init` scaffolds `.gitignore` (.agentbox/).
