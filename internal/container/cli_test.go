@@ -106,6 +106,38 @@ func TestCLIImageExists(t *testing.T) {
 	}
 }
 
+// TestCLIImageExistsArgvAndErrors pins the real `container image inspect`
+// subcommand (the old code shelled the nonexistent `container images inspect`,
+// which always failed → always "absent") and that a non-"absent" failure is
+// surfaced as an error rather than reported as a missing image.
+func TestCLIImageExistsArgvAndErrors(t *testing.T) {
+	rec := &recorder{exit: 0}
+	r := &CLIRuntime{Bin: "container", run: rec.fn()}
+	ok, err := r.ImageExists(context.Background(), "agentbox:latest")
+	if err != nil || !ok {
+		t.Fatalf("present image: got %v,%v", ok, err)
+	}
+	a := lastArgs(rec)
+	if !hasSeq(a, "container", "image", "inspect", "agentbox:latest") {
+		t.Errorf("argv must be `container image inspect <ref>`, got %v", a)
+	}
+	if hasSeq(a, "images") {
+		t.Errorf("must not use the fabricated `images` subcommand: %v", a)
+	}
+
+	// exit 1 => absent, no error.
+	r1 := &CLIRuntime{run: (&recorder{exit: 1}).fn()}
+	if ok, err := r1.ImageExists(context.Background(), "x"); err != nil || ok {
+		t.Fatalf("exit 1 => absent: got %v,%v", ok, err)
+	}
+
+	// Any other non-zero exit must be surfaced as an error (not "absent").
+	r2 := &CLIRuntime{run: (&recorder{exit: 125}).fn()}
+	if ok, err := r2.ImageExists(context.Background(), "x"); err == nil || ok {
+		t.Fatalf("exit 125 must surface an error, got ok=%v err=%v", ok, err)
+	}
+}
+
 func TestCLIRunArgsAndID(t *testing.T) {
 	rec := &recorder{stdout: "  abc123\n", exit: 0}
 	r := &CLIRuntime{run: rec.fn()}

@@ -16,12 +16,12 @@ import (
 // adjusted for a given `container` version without touching call sites. See
 // DECISIONS D10.
 const (
-	subBuild        = "build"
-	subRun          = "run"
-	subExec         = "exec"
-	subStop         = "stop"
-	subDelete       = "delete"
-	subImageInspect = "images" // used as: container images inspect <ref>
+	subBuild  = "build"
+	subRun    = "run"
+	subExec   = "exec"
+	subStop   = "stop"
+	subDelete = "delete"
+	subImage  = "image" // used as: container image inspect <ref>
 )
 
 // commandFunc launches a command, streaming stdout/stderr to the given writers,
@@ -135,11 +135,23 @@ func (r *CLIRuntime) Build(ctx context.Context, opts BuildOptions) error {
 }
 
 func (r *CLIRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
-	res, err := r.capture(ctx, nil, nil, subImageInspect, "inspect", image)
+	// `container image inspect <ref>` exits 0 when the image is present and 1
+	// when it is absent. Any other non-zero exit (e.g. the container service is
+	// down, or a malformed reference) is a real failure we must surface rather
+	// than silently report as "absent".
+	res, err := r.capture(ctx, nil, nil, subImage, "inspect", image)
 	if err != nil {
-		return false, fmt.Errorf("container images inspect: %w", err)
+		return false, fmt.Errorf("container image inspect: %w", err)
 	}
-	return res.ExitCode == 0, nil
+	switch res.ExitCode {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	default:
+		return false, fmt.Errorf("container image inspect: %s exited %d: %s",
+			r.bin(), res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
 }
 
 func (r *CLIRuntime) Run(ctx context.Context, opts RunOptions) (string, error) {

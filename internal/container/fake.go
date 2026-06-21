@@ -8,12 +8,14 @@ import (
 
 // Call records a single invocation of a Fake method, for assertions in tests.
 type Call struct {
-	Method string // "Build", "ImageExists", "Run", "Exec", "Stop", "Remove"
-	ID     string // container id, for Exec/Stop/Remove
-	Image  string // for Run/ImageExists
-	Tag    string // for Build
-	Cmd    []string
-	Env    map[string]string
+	Method  string // "Build", "ImageExists", "Run", "Exec", "Stop", "Remove"
+	ID      string // container id, for Exec/Stop/Remove
+	Image   string // for Run/ImageExists
+	Tag     string // for Build
+	Cmd     []string
+	Env     map[string]string
+	Mounts  []Mount // for Run
+	Workdir string  // for Run/Exec
 }
 
 // Fake is an in-memory [Runtime] for tests. It records every call and lets a
@@ -120,7 +122,7 @@ func (f *Fake) ImageExists(ctx context.Context, image string) (bool, error) {
 }
 
 func (f *Fake) Run(ctx context.Context, opts RunOptions) (string, error) {
-	f.record(Call{Method: "Run", Image: opts.Image, Cmd: opts.Cmd, Env: opts.Env})
+	f.record(Call{Method: "Run", Image: opts.Image, Cmd: opts.Cmd, Env: opts.Env, Mounts: opts.Mounts, Workdir: opts.Workdir})
 	if f.RunFunc != nil {
 		id, err := f.RunFunc(ctx, opts)
 		if err == nil && id != "" {
@@ -145,7 +147,7 @@ func (f *Fake) Run(ctx context.Context, opts RunOptions) (string, error) {
 }
 
 func (f *Fake) Exec(ctx context.Context, id string, opts ExecOptions) (ExecResult, error) {
-	f.record(Call{Method: "Exec", ID: id, Cmd: opts.Cmd, Env: opts.Env})
+	f.record(Call{Method: "Exec", ID: id, Cmd: opts.Cmd, Env: opts.Env, Workdir: opts.Workdir})
 	if f.ExecFunc != nil {
 		return f.ExecFunc(ctx, id, opts)
 	}
