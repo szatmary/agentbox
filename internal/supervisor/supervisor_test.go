@@ -284,6 +284,69 @@ func contains(ss []string, want string) bool {
 	return false
 }
 
+func TestRunSetupCommands(t *testing.T) {
+	var setupCmds [][]string
+	claudeCalls := 0
+	f := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			switch opts.Cmd[0] {
+			case "cat":
+				if opts.Cmd[1] == statusPath(run.StatusFile) {
+					return container.ExecResult{ExitCode: 0, Stdout: "DONE\n"}, nil
+				}
+				return container.ExecResult{ExitCode: 1}, nil
+			case "claude":
+				claudeCalls++
+				return container.ExecResult{ExitCode: 0}, nil
+			default:
+				setupCmds = append(setupCmds, opts.Cmd)
+				return container.ExecResult{ExitCode: 0}, nil
+			}
+		},
+	}
+	s := New(f, Options{
+		Image:    "img",
+		Task:     "x",
+		MaxIters: 10,
+		Setup: [][]string{
+			{"git", "config", "--global", "user.name", "Matthew Szatmary"},
+			{"sh", "-c", "git clone repo ."},
+		},
+	})
+	res, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != StatusDone {
+		t.Fatalf("Status = %v", res.Status)
+	}
+	if len(setupCmds) != 2 {
+		t.Fatalf("setup commands run = %d, want 2", len(setupCmds))
+	}
+	if setupCmds[0][0] != "git" || setupCmds[1][0] != "sh" {
+		t.Errorf("setup commands wrong: %v", setupCmds)
+	}
+}
+
+func TestRunSetupFailureAborts(t *testing.T) {
+	f := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			if opts.Cmd[0] == "setup-fail" {
+				return container.ExecResult{ExitCode: 1, Stderr: "boom"}, nil
+			}
+			return container.ExecResult{ExitCode: 0}, nil
+		},
+	}
+	s := New(f, Options{Image: "img", Task: "x", MaxIters: 10, Setup: [][]string{{"setup-fail"}}})
+	if _, err := s.Run(context.Background()); err == nil {
+		t.Fatal("expected setup failure to abort the run")
+	}
+	// VM still torn down.
+	if len(f.Removed()) != 1 {
+		t.Errorf("teardown not run after setup failure: %v", f.Removed())
+	}
+}
+
 func TestClaudeArgs(t *testing.T) {
 	first := claudeArgs("claude", 1, "TASK", "RESUME", "", 0)
 	if first[0] != "claude" || first[1] != "-p" || first[2] != "TASK" {

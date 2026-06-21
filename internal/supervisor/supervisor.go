@@ -15,6 +15,7 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path"
 	"time"
@@ -83,6 +84,10 @@ type Options struct {
 	ClaudeBin string
 	// LogOut, if non-nil, receives streamed claude stdout/stderr per iteration.
 	LogOut io.Writer
+	// Setup are commands run once inside the VM after it starts and before the
+	// first iteration (e.g. install credentials, configure git, clone the repo).
+	// Each must exit 0; a non-zero exit or launch error aborts the run.
+	Setup [][]string
 }
 
 func (o *Options) setDefaults() {
@@ -159,6 +164,10 @@ func (s *Supervisor) Run(ctx context.Context) (Result, error) {
 	}
 	defer s.teardown(id)
 
+	if err := s.runSetup(ctx, id); err != nil {
+		return Result{}, err
+	}
+
 	start := s.now()
 	for iter := 1; ; iter++ {
 		if err := ctx.Err(); err != nil {
@@ -205,6 +214,29 @@ func (s *Supervisor) Run(ctx context.Context) (Result, error) {
 			}
 		}
 	}
+}
+
+// runSetup executes the one-time setup commands inside the VM.
+func (s *Supervisor) runSetup(ctx context.Context, id string) error {
+	for i, cmd := range s.opts.Setup {
+		if len(cmd) == 0 {
+			continue
+		}
+		s.logf("setup command", "index", i)
+		res, err := s.rt.Exec(ctx, id, container.ExecOptions{
+			Cmd:     cmd,
+			Workdir: s.opts.Workdir,
+			Stdout:  s.opts.LogOut,
+			Stderr:  s.opts.LogOut,
+		})
+		if err != nil {
+			return fmt.Errorf("setup command %d: %w", i, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("setup command %d exited %d: %s", i, res.ExitCode, res.Stderr)
+		}
+	}
+	return nil
 }
 
 func (s *Supervisor) elapsed(start time.Time) time.Duration { return s.now().Sub(start) }

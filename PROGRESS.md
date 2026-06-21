@@ -9,7 +9,7 @@ Living log of what is done. Newest first. Read this + ROADMAP.md on each fresh r
 - [x] 4. `internal/supervisor`
 - [x] 5. `internal/autorun`
 - [x] 6. `internal/container` real impl + `internal/embedfs`
-- [ ] 7. `cmd/agentbox` subcommands
+- [x] 7. `cmd/agentbox` subcommands
 - [ ] 8. README + goreleaser + example job
 
 ## Log
