@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/szatmary/agentbox/internal/auth"
 	"github.com/szatmary/agentbox/internal/config"
@@ -366,6 +367,115 @@ func TestRunDoctorMissingContainerAndCred(t *testing.T) {
 	}
 	if fails < 2 {
 		t.Errorf("expected >=2 FAILs (container, credential), got %d:\n%+v", fails, results)
+	}
+}
+
+// fakeSignaler records terminate calls and reports liveness from a set.
+type fakeSignaler struct {
+	live       map[int]bool
+	terminated []int
+}
+
+func (f *fakeSignaler) alive(pid int) bool { return f.live[pid] }
+func (f *fakeSignaler) terminate(pid int) error {
+	f.terminated = append(f.terminated, pid)
+	return nil
+}
+
+// TestSignalPidfileLiveness covers O2: a dead/reused PID must NOT be signalled
+// (and its stale pidfile is removed); a live PID is signalled.
+func TestSignalPidfileLiveness(t *testing.T) {
+	base := t.TempDir()
+	var buf bytes.Buffer
+
+	// Dead PID: must not terminate; pidfile removed.
+	deadPid := filepath.Join(base, "dead.pid")
+	if err := os.WriteFile(deadPid, []byte("4242\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sigDead := &fakeSignaler{live: map[int]bool{}}
+	if signalPidfile(&buf, deadPid, sigDead) {
+		t.Error("signalPidfile reported action for a dead PID")
+	}
+	if len(sigDead.terminated) != 0 {
+		t.Errorf("dead PID must not be signalled, got %v", sigDead.terminated)
+	}
+	if fileExists(deadPid) {
+		t.Error("stale pidfile should be removed")
+	}
+
+	// Live PID: terminate is called.
+	livePid := filepath.Join(base, "live.pid")
+	if err := os.WriteFile(livePid, []byte("777\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sigLive := &fakeSignaler{live: map[int]bool{777: true}}
+	if !signalPidfile(&buf, livePid, sigLive) {
+		t.Error("signalPidfile should act on a live PID")
+	}
+	if len(sigLive.terminated) != 1 || sigLive.terminated[0] != 777 {
+		t.Errorf("live PID not signalled: %v", sigLive.terminated)
+	}
+}
+
+// TestDetachPidfileCleanup covers O2: the detached child removes its pidfile on
+// exit; a non-detached process leaves it alone.
+func TestDetachPidfileCleanup(t *testing.T) {
+	base := t.TempDir()
+	pidPath := filepath.Join(base, "job.pid")
+	if err := os.WriteFile(pidPath, []byte("123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not the detached child: no-op.
+	t.Setenv(detachedEnv, "")
+	detachPidfileCleanup(base, "job")()
+	if !fileExists(pidPath) {
+		t.Error("non-detached process must not remove the pidfile")
+	}
+
+	// Detached child: removes its pidfile.
+	t.Setenv(detachedEnv, "1")
+	detachPidfileCleanup(base, "job")()
+	if fileExists(pidPath) {
+		t.Error("detached child should remove its pidfile on exit")
+	}
+}
+
+// TestClearJobStop covers O2: a stale job-level stop marker is consumed on
+// startup so it does not poison future autoruns.
+func TestClearJobStop(t *testing.T) {
+	runsDir := filepath.Join(t.TempDir(), "runs")
+	stopPath := filepath.Join(runsBase(runsDir), "job.stop")
+	if err := os.MkdirAll(runsBase(runsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stopPath, []byte("stop\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !jobStopRequested(runsDir, "job")() {
+		t.Fatal("precondition: stop marker should be detected")
+	}
+	clearJobStop(runsDir, "job")
+	if jobStopRequested(runsDir, "job")() {
+		t.Error("stale stop marker not cleared on startup")
+	}
+}
+
+// TestAutorunWall covers O1: the per-run wall is the more-restrictive of
+// guards.max_wall (set by --max-wall) and autorun.per_run_wall.
+func TestAutorunWall(t *testing.T) {
+	cfg := config.Default()
+	cfg.Autorun.PerRunWall = config.Duration(3 * time.Hour)
+
+	cfg.Guards.MaxWall = config.Duration(1 * time.Hour)
+	if got := autorunWall(cfg); got != time.Hour {
+		t.Errorf("guards.max_wall more restrictive: got %v, want 1h", got)
+	}
+
+	cfg.Guards.MaxWall = config.Duration(5 * time.Hour)
+	if got := autorunWall(cfg); got != 3*time.Hour {
+		t.Errorf("per_run_wall more restrictive: got %v, want 3h", got)
 	}
 }
 

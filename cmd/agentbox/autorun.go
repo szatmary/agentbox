@@ -7,9 +7,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/szatmary/agentbox/internal/autorun"
+	"github.com/szatmary/agentbox/internal/config"
 	"github.com/szatmary/agentbox/internal/supervisor"
 )
 
@@ -44,9 +46,17 @@ func newAutorunCmd(g *globalFlags) *cobra.Command {
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
+			// O2: consume any stale job-level stop marker on startup so a previous
+			// `stop` does not permanently poison future autoruns of this job.
+			clearJobStop(g.runsDir, cfg.Name)
+
+			// O2: remove our pidfile on exit (detached child only).
+			defer detachPidfileCleanup(runsBase(g.runsDir), cfg.Name+"-autorun")()
+
+			wall := autorunWall(cfg)
 			loop := &autorun.Autorun{
 				Runner: runnerFunc(func(ctx context.Context) (supervisor.Result, error) {
-					return executeRun(ctx, cmd.OutOrStdout(), g.runsDir, cfg, taskText, image, cfg.Autorun.PerRunWall.D())
+					return executeRun(ctx, cmd.OutOrStdout(), g.runsDir, cfg, taskText, image, wall)
 				}),
 				Options: autorun.Options{
 					MaxNoProgress: cfg.Autorun.MaxNoProgress,
@@ -85,4 +95,22 @@ func jobStopRequested(runsDir, name string) func() bool {
 		_, err := os.Stat(stopPath)
 		return err == nil
 	}
+}
+
+// clearJobStop removes a stale job-level stop marker at startup. Without this a
+// `.stop` written by a previous `stop` is never cleared and would immediately
+// halt every future autorun of the same job. See O2.
+func clearJobStop(runsDir, name string) {
+	_ = os.Remove(filepath.Join(runsBase(runsDir), name+".stop"))
+}
+
+// autorunWall is the per-run wall budget: the more-restrictive (smaller
+// positive) of autorun.per_run_wall and guards.max_wall, so a --max-wall
+// override (which sets guards.max_wall) is honored for autorun too. See O1.
+func autorunWall(cfg config.Config) time.Duration {
+	wall := cfg.Autorun.PerRunWall.D()
+	if mw := cfg.Guards.MaxWall.D(); mw > 0 && (wall <= 0 || mw < wall) {
+		wall = mw
+	}
+	return wall
 }

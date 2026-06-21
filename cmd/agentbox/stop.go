@@ -42,7 +42,7 @@ func newStopCmd(g *globalFlags) *cobra.Command {
 			for _, marker := range []string{ref, ref + "-autorun"} {
 				stopPath := filepath.Join(base, marker+".stop")
 				if err := os.WriteFile(stopPath, []byte("stop\n"), 0o644); err == nil {
-					if signalPidfile(out, filepath.Join(base, marker+".pid")) {
+					if signalPidfile(out, filepath.Join(base, marker+".pid"), osSignaler{}) {
 						acted = true
 					}
 				}
@@ -92,8 +92,44 @@ func latestRunFor(runsDir, name string) (string, bool) {
 	return best, best != ""
 }
 
-// signalPidfile sends SIGTERM to the PID in pidPath, if present.
-func signalPidfile(out interface{ Write([]byte) (int, error) }, pidPath string) bool {
+// pidSignaler abstracts process liveness/termination so signalPidfile is
+// testable without real processes.
+type pidSignaler interface {
+	// alive reports whether a process with pid currently exists.
+	alive(pid int) bool
+	// terminate sends a graceful termination signal to pid.
+	terminate(pid int) error
+}
+
+// osSignaler is the production pidSignaler using os.FindProcess + signals.
+type osSignaler struct{}
+
+// alive uses signal 0 (the null signal) to probe for the process's existence
+// without affecting it.
+func (osSignaler) alive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func (osSignaler) terminate(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGTERM)
+}
+
+// signalPidfile sends SIGTERM to the PID in pidPath, but only after a Signal(0)
+// liveness check confirms the process still exists. This prevents `stop` from
+// SIGTERM-ing an unrelated process that happens to have reused a dead agentbox's
+// PID. A stale pidfile (process gone) is removed. See O2.
+func signalPidfile(out interface{ Write([]byte) (int, error) }, pidPath string, sig pidSignaler) bool {
 	b, err := os.ReadFile(pidPath)
 	if err != nil {
 		return false
@@ -102,11 +138,13 @@ func signalPidfile(out interface{ Write([]byte) (int, error) }, pidPath string) 
 	if err != nil {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
+	if !sig.alive(pid) {
+		// Process is gone: do not signal a possibly-reused PID; clean up.
+		_ = os.Remove(pidPath)
+		fmt.Fprintf(out, "pidfile %s is stale (pid %d not running); removed\n", filepath.Base(pidPath), pid)
 		return false
 	}
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := sig.terminate(pid); err != nil {
 		return false
 	}
 	fmt.Fprintf(out, "sent SIGTERM to pid %d\n", pid)
