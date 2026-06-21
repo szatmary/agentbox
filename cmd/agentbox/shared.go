@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,8 +15,24 @@ import (
 	"github.com/szatmary/agentbox/internal/run"
 )
 
-// credentialsFileInVM is where the keychain OAuth blob is copied inside the VM.
-const credentialsFileInVM = "/work/control/.claude-credentials.json"
+// secretsMountTarget is a dedicated, read-only mount inside the VM holding the
+// staged secrets. It is deliberately NOT the bind-mounted control/output dirs
+// (which persist on the host and hold run artifacts): the staging dir is created
+// outside them and removed after teardown. See S1/S2.
+const secretsMountTarget = "/work/.agentbox"
+
+// credentialsFileInVM is the in-VM path of the keychain OAuth blob (copied into
+// place by setup). It lives on the ephemeral secrets mount, never the control dir.
+const credentialsFileInVM = secretsMountTarget + "/.claude-credentials.json"
+
+// secretsEnvFileInVM is the in-VM path of the 0600 env file holding secret
+// environment assignments, sourced before every command so secrets never appear
+// in `container run`/`container exec` argv. See S1.
+const secretsEnvFileInVM = secretsMountTarget + "/env"
+
+// secretsDirName is the host-side staging subdirectory under the run root. It is
+// a sibling of (not under) the bind-mounted control/output/workspace dirs.
+const secretsDirName = "secrets"
 
 // defaultImageTag is the sandbox image agentbox builds and runs.
 const defaultImageTag = "agentbox:latest"
@@ -101,27 +118,47 @@ func buildSetup(inj auth.Injection, repo string) [][]string {
 	return setup
 }
 
-// writeCredentials writes the keychain OAuth blob into the run's control dir so
-// the in-VM setup can copy it into place. It returns the host path written, or
-// "" when there is nothing to write. The file is 0600.
-func writeCredentials(r *run.Run, inj auth.Injection) (string, error) {
-	if inj.ClaudeCredentialsJSON == "" {
-		return "", nil
+// stageSecrets writes the injected secrets (env assignments + optional keychain
+// OAuth blob) into a 0700 staging dir under the run root, OUTSIDE the
+// bind-mounted control/output/workspace dirs, and returns a read-only mount of
+// that dir plus a cleanup func that removes it. Routing secrets through a
+// sourced 0600 file (not argv) is S1; staging outside the control dir and
+// removing it after teardown is S2.
+func stageSecrets(r *run.Run, inj auth.Injection) (container.Mount, func(), error) {
+	dir := r.Path(secretsDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return container.Mount{}, func() {}, fmt.Errorf("staging secrets: %w", err)
 	}
-	p := r.Control(".claude-credentials.json")
-	if err := os.WriteFile(p, []byte(inj.ClaudeCredentialsJSON), 0o600); err != nil {
-		return "", fmt.Errorf("writing claude credentials: %w", err)
+	cleanup := func() { _ = os.RemoveAll(dir) }
+
+	// env file: KEY='value' per line; sourced with `set -a` inside the VM.
+	var b strings.Builder
+	for _, k := range sortedStringKeys(inj.Env) {
+		b.WriteString(k + "=" + shellQuote(inj.Env[k]) + "\n")
 	}
-	return p, nil
+	if err := os.WriteFile(filepath.Join(dir, "env"), []byte(b.String()), 0o600); err != nil {
+		cleanup()
+		return container.Mount{}, func() {}, fmt.Errorf("writing secrets env file: %w", err)
+	}
+
+	if inj.ClaudeCredentialsJSON != "" {
+		if err := os.WriteFile(filepath.Join(dir, ".claude-credentials.json"),
+			[]byte(inj.ClaudeCredentialsJSON), 0o600); err != nil {
+			cleanup()
+			return container.Mount{}, func() {}, fmt.Errorf("writing claude credentials: %w", err)
+		}
+	}
+
+	return container.Mount{Source: dir, Target: secretsMountTarget, ReadOnly: true}, cleanup, nil
 }
 
-// envFor merges the injected secret env vars (copy to avoid mutation).
-func envFor(inj auth.Injection) map[string]string {
-	env := make(map[string]string, len(inj.Env))
-	for k, v := range inj.Env {
-		env[k] = v
+func sortedStringKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	return env
+	sort.Strings(keys)
+	return keys
 }
 
 // resolveAuth resolves credentials for the job, with a clear error on failure.

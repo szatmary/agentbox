@@ -69,9 +69,23 @@ func Create(base, name, id string) (*Run, error) {
 	if _, err := os.Stat(root); err == nil {
 		return nil, fmt.Errorf("run: directory already exists: %s", root)
 	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("run: mkdir %s: %w", root, err)
+	}
 	for _, sub := range []string{ControlDir, OutputDir, LogsDir, WorkspaceDir} {
-		if err := os.MkdirAll(filepath.Join(root, sub), 0o755); err != nil {
+		// The control dir carries the host↔agent channel; keep it owner-only.
+		// (Staged secrets live in a sibling dir, also owner-only.) See H3.
+		perm := os.FileMode(0o755)
+		if sub == ControlDir {
+			perm = 0o700
+		}
+		p := filepath.Join(root, sub)
+		if err := os.MkdirAll(p, perm); err != nil {
 			return nil, fmt.Errorf("run: mkdir %s: %w", sub, err)
+		}
+		// MkdirAll honours umask and won't tighten an existing dir; force perms.
+		if err := os.Chmod(p, perm); err != nil {
+			return nil, fmt.Errorf("run: chmod %s: %w", sub, err)
 		}
 	}
 	r := &Run{Root: root, Name: name, ID: id}

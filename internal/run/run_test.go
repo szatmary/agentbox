@@ -27,6 +27,31 @@ func TestCreateLayout(t *testing.T) {
 	}
 }
 
+// TestControlDirPerms covers H3: the control dir (host↔agent channel, transient
+// secrets staging sibling) must be owner-only (0700).
+func TestControlDirPerms(t *testing.T) {
+	r, err := Create(t.TempDir(), "job", "20260621120000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	fi, err := os.Stat(r.Path(ControlDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("control dir perm = %o, want 700", perm)
+	}
+	// Other subdirs stay traversable.
+	fi, err = os.Stat(r.Path(OutputDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o755 {
+		t.Errorf("output dir perm = %o, want 755", perm)
+	}
+}
+
 func TestCreateRequiresNameAndID(t *testing.T) {
 	if _, err := Create(t.TempDir(), "", "id"); err == nil {
 		t.Error("expected error for empty name")

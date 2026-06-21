@@ -10,7 +10,9 @@ import (
 
 	"github.com/szatmary/agentbox/internal/auth"
 	"github.com/szatmary/agentbox/internal/config"
+	"github.com/szatmary/agentbox/internal/container"
 	"github.com/szatmary/agentbox/internal/run"
+	"github.com/szatmary/agentbox/internal/supervisor"
 )
 
 func execRoot(t *testing.T, args ...string) (string, error) {
@@ -161,6 +163,153 @@ func flatten(cmds [][]string) string {
 type okTokener struct{}
 
 func (okTokener) Token(ctx context.Context) (string, error) { return "tok", nil }
+
+// fakeKeychain is an auth.Keychain returning a fixed blob (for the wiring test).
+type fakeKeychain struct{ blob string }
+
+func (f fakeKeychain) Find(service string) (string, error) { return f.blob, nil }
+
+// TestExecuteRunWiringNoSecretsInArgv covers S1, S2 and H3 together: with an
+// injected fake Runtime and credential resolver, executeRunWith must (1) never
+// place secret values in `container run`/`exec` argv or env, (2) route secrets
+// through a sourced env file, (3) wire mounts/model correctly, (4) stage the
+// cred blob OUTSIDE the control dir and remove it after teardown.
+func TestExecuteRunWiringNoSecretsInArgv(t *testing.T) {
+	const (
+		ghSecret   = "ghp_SECRET_TOKEN_VALUE"
+		credSecret = `{"oauth":"CLAUDE_SECRET_BLOB"}`
+		model      = "claude-opus-4-8"
+	)
+	runsDir := filepath.Join(t.TempDir(), "runs")
+
+	// Fake runtime: drive the supervisor to DONE on the first iteration.
+	fake := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			if len(opts.Cmd) > 0 && opts.Cmd[0] == "cat" {
+				if strings.HasSuffix(opts.Cmd[1], run.StatusFile) {
+					return container.ExecResult{ExitCode: 0, Stdout: "DONE\n"}, nil
+				}
+				return container.ExecResult{ExitCode: 1}, nil // STOP absent
+			}
+			return container.ExecResult{ExitCode: 0}, nil
+		},
+	}
+
+	// keychain claude (=> cred blob) + pat github (=> GITHUB_TOKEN/GH_TOKEN env).
+	resolver := auth.Resolver{
+		Env:      auth.MapEnv{"GITHUB_TOKEN": ghSecret},
+		Keychain: fakeKeychain{blob: credSecret},
+	}
+	cfg := config.Default()
+	cfg.Name = "wiretest"
+	cfg.Repo = "https://github.com/szatmary/go2110.git"
+	cfg.Model.Name = model
+	cfg.Auth = config.Auth{Claude: config.ClaudeKeychain, GitHub: config.GitHubPAT}
+
+	var out bytes.Buffer
+	res, err := executeRunWith(context.Background(), &out, runsDir, cfg, "TASKPROMPT", "agentbox:latest",
+		cfg.Guards.MaxWall.D(), fake, resolver)
+	if err != nil {
+		t.Fatalf("executeRunWith: %v", err)
+	}
+	if res.Status != supervisor.StatusDone {
+		t.Fatalf("status = %v, want done", res.Status)
+	}
+
+	secrets := []string{ghSecret, credSecret}
+
+	// S1: no secret value anywhere in Run argv/env.
+	runCalls := fake.CallsOf("Run")
+	if len(runCalls) != 1 {
+		t.Fatalf("Run calls = %d, want 1", len(runCalls))
+	}
+	rc := runCalls[0]
+	for _, v := range rc.Env {
+		for _, sec := range secrets {
+			if strings.Contains(v, sec) {
+				t.Errorf("secret leaked into container run env: %q", v)
+			}
+		}
+	}
+	for _, arg := range rc.Cmd {
+		for _, sec := range secrets {
+			if strings.Contains(arg, sec) {
+				t.Errorf("secret leaked into container run cmd: %q", arg)
+			}
+		}
+	}
+
+	// S1: no secret value in ANY exec argv/env either.
+	var sawSecretsSourcing bool
+	for _, c := range fake.CallsOf("Exec") {
+		joined := strings.Join(c.Cmd, " ")
+		for _, sec := range secrets {
+			if strings.Contains(joined, sec) {
+				t.Errorf("secret leaked into exec argv: %q", joined)
+			}
+			for _, v := range c.Env {
+				if strings.Contains(v, sec) {
+					t.Errorf("secret leaked into exec env: %q", v)
+				}
+			}
+		}
+		if strings.Contains(joined, secretsEnvFileInVM) {
+			sawSecretsSourcing = true
+		}
+	}
+	if !sawSecretsSourcing {
+		t.Error("S1: no command sourced the secrets env file")
+	}
+
+	// H3: model is wired into the claude invocation.
+	var sawModel bool
+	for _, c := range fake.CallsOf("Exec") {
+		if strings.Contains(strings.Join(c.Cmd, " "), model) {
+			sawModel = true
+		}
+	}
+	if !sawModel {
+		t.Error("H3: model not wired into claude args")
+	}
+
+	// H3: the run's bind mounts (control/output/workspace) plus the secrets
+	// mount are present; the secrets mount target is NOT the control dir.
+	var controlSrc, secretsSrc string
+	for _, m := range rc.Mounts {
+		switch m.Target {
+		case "/work/control":
+			controlSrc = m.Source
+		case secretsMountTarget:
+			secretsSrc = m.Source
+		}
+	}
+	if controlSrc == "" {
+		t.Fatal("control mount missing")
+	}
+	if secretsSrc == "" {
+		t.Fatal("secrets mount missing")
+	}
+	// S2: secrets staged OUTSIDE the bind-mounted control dir...
+	if strings.HasPrefix(secretsSrc, controlSrc+string(os.PathSeparator)) {
+		t.Errorf("secrets staged under the control dir: %s under %s", secretsSrc, controlSrc)
+	}
+	// ...and removed after teardown.
+	if _, err := os.Stat(secretsSrc); !os.IsNotExist(err) {
+		t.Errorf("secrets staging dir not removed after run: stat err = %v", err)
+	}
+	// S2: no leftover credentials file anywhere under the run dir.
+	walkAssertNoCredFile(t, runsDir)
+}
+
+func walkAssertNoCredFile(t *testing.T, root string) {
+	t.Helper()
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() && strings.Contains(info.Name(), "credentials") {
+			t.Errorf("leftover credential file: %s", p)
+		}
+		return nil
+	})
+}
 
 // fakeProber drives runDoctor without touching the host.
 type fakeProber struct {
