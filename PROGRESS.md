@@ -5,7 +5,7 @@ Living log of what is done. Newest first. Read this + ROADMAP.md on each fresh r
 ## Step status
 - [x] 1. Scaffold + CI + `container.Runtime` + fake
 - [x] 2. `internal/config` + `internal/run`
-- [ ] 3. `internal/auth`
+- [x] 3. `internal/auth`
 - [ ] 4. `internal/supervisor`
 - [ ] 5. `internal/autorun`
 - [ ] 6. `internal/container` real impl + `internal/embedfs`
