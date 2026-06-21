@@ -43,6 +43,7 @@ func newRootCmd() *cobra.Command {
 		newSSHCmd(g),
 		newSSHProxyCmd(g),
 		newAttachCmd(g),
+		newMCPCmd(g),
 	)
 	return root
 }

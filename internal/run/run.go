@@ -111,6 +111,29 @@ func Open(root string) (*Run, error) {
 	return &Run{Root: abs, Name: name, ID: id}, nil
 }
 
+// ListDirs returns the run directories directly under runsDir (those containing
+// a control/ subdirectory). A missing runsDir yields an empty list, not an error.
+func ListDirs(runsDir string) ([]string, error) {
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(runsDir, e.Name())
+		if _, err := os.Stat(filepath.Join(p, ControlDir)); err == nil {
+			dirs = append(dirs, p)
+		}
+	}
+	return dirs, nil
+}
+
 func splitNameID(base string) (name, id string) {
 	for i := len(base) - 1; i >= 0; i-- {
 		if base[i] == '-' {
