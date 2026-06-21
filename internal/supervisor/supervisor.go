@@ -15,9 +15,11 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/szatmary/agentbox/internal/container"
@@ -38,7 +40,15 @@ const (
 	StatusGuardIters Status = "guard_iters"
 	// StatusStopped — a STOP file requested a graceful halt.
 	StatusStopped Status = "stopped"
+	// StatusClaudeError — claude exited non-zero on consecutive iterations
+	// without writing STATUS (no progress). Surfaced alongside an error so the
+	// run is not misreported as a benign guard trip. See C2.
+	StatusClaudeError Status = "claude_error"
 )
+
+// DefaultMaxClaudeErrors is how many consecutive non-zero claude exits without
+// progress (no STATUS) are tolerated before the run aborts. See C2.
+const DefaultMaxClaudeErrors = 3
 
 // Terminal reports whether a status means the overall job is finished and
 // should not be relaunched (DONE or FAILED).
@@ -88,6 +98,15 @@ type Options struct {
 	// first iteration (e.g. install credentials, configure git, clone the repo).
 	// Each must exit 0; a non-zero exit or launch error aborts the run.
 	Setup [][]string
+
+	// SecretsFile, when non-empty, is the in-VM path of a 0600 file holding
+	// secret env assignments. Every setup and claude command is wrapped to source
+	// it (set -a) so secrets reach the process environment without ever appearing
+	// in `container run`/`container exec` argv (visible via ps/inspect). See S1.
+	SecretsFile string
+	// MaxClaudeErrors caps consecutive non-zero claude exits without progress
+	// before the run aborts; <=0 means DefaultMaxClaudeErrors. See C2.
+	MaxClaudeErrors int
 }
 
 func (o *Options) setDefaults() {
@@ -122,6 +141,10 @@ type Supervisor struct {
 
 	// Clock returns the current time; defaults to time.Now. Injectable for tests.
 	Clock func() time.Time
+	// Sleep waits for d or until ctx is cancelled, returning ctx.Err() if
+	// cancelled. Defaults to a real timer. Injectable for tests (claude-error
+	// backoff). See C2.
+	Sleep func(ctx context.Context, d time.Duration) error
 	// Log receives non-secret progress messages; may be nil.
 	Log Logger
 }
@@ -143,6 +166,64 @@ func (s *Supervisor) logf(msg string, args ...any) {
 	if s.Log != nil {
 		s.Log.Info(msg, args...)
 	}
+}
+
+// sleep waits for d, returning early with ctx.Err() if the context is cancelled.
+func (s *Supervisor) sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	if s.Sleep != nil {
+		return s.Sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func (s *Supervisor) maxClaudeErrors() int {
+	if s.opts.MaxClaudeErrors > 0 {
+		return s.opts.MaxClaudeErrors
+	}
+	return DefaultMaxClaudeErrors
+}
+
+// claudeBackoff returns the backoff before retrying after the nth consecutive
+// failing claude exit (n starts at 1): 1s, 2s, 4s, … capped at 60s.
+func claudeBackoff(n int) time.Duration {
+	if n < 1 {
+		n = 1
+	}
+	d := time.Second << (n - 1)
+	if d <= 0 || d > 60*time.Second {
+		return 60 * time.Second
+	}
+	return d
+}
+
+// wrapCmd wraps a command so it sources the secrets file (exporting its
+// assignments) before exec-ing the original argv. When no secrets file is
+// configured the command is returned unchanged. Keeping secrets in a sourced
+// file (not argv) is the whole point of S1.
+func (s *Supervisor) wrapCmd(cmd []string) []string {
+	if s.opts.SecretsFile == "" || len(cmd) == 0 {
+		return cmd
+	}
+	f := shellSingleQuote(s.opts.SecretsFile)
+	// set -a so sourced assignments are exported; guard on existence; exec the
+	// original argv via "$@" so no re-quoting of the original command is needed.
+	script := "set -a; [ -f " + f + " ] && . " + f + "; set +a; exec \"$@\""
+	return append([]string{"sh", "-c", script, "sh"}, cmd...)
+}
+
+// shellSingleQuote single-quotes s for safe inclusion in a /bin/sh script.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Run starts the VM, drives the resume loop to a terminal condition, then stops
@@ -169,6 +250,7 @@ func (s *Supervisor) Run(ctx context.Context) (Result, error) {
 	}
 
 	start := s.now()
+	claudeErrors := 0
 	for iter := 1; ; iter++ {
 		if err := ctx.Err(); err != nil {
 			return Result{Status: StatusStopped, Iterations: iter - 1, Elapsed: s.elapsed(start)}, err
@@ -190,12 +272,33 @@ func (s *Supervisor) Run(ctx context.Context) (Result, error) {
 
 		args := claudeArgs(s.opts.ClaudeBin, iter, s.opts.Task, s.opts.ResumePrompt, s.opts.Model, s.opts.MaxTurns)
 		s.logf("iteration start", "iter", iter)
-		if _, err := s.rt.Exec(ctx, id, container.ExecOptions{
-			Cmd:     args,
+
+		// O3: bound the in-flight exec by the remaining wall budget so a hung
+		// claude is interrupted (not left running until the next guard check,
+		// which only fires between iterations).
+		execCtx := ctx
+		var cancel context.CancelFunc
+		if s.opts.MaxWall > 0 {
+			if remaining := s.opts.MaxWall - s.elapsed(start); remaining > 0 {
+				execCtx, cancel = context.WithTimeout(ctx, remaining)
+			}
+		}
+		res, err := s.rt.Exec(execCtx, id, container.ExecOptions{
+			Cmd:     s.wrapCmd(args),
 			Workdir: s.opts.Workdir,
 			Stdout:  s.opts.LogOut,
 			Stderr:  s.opts.LogOut,
-		}); err != nil {
+		})
+		if cancel != nil {
+			cancel()
+		}
+		if err != nil {
+			// A per-exec deadline (wall budget) firing while the parent context
+			// is still live is a wall-clock guard trip, not an infra failure.
+			if ctx.Err() == nil && errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				s.logf("guard: wall-clock budget exhausted mid-exec", "iter", iter, "max_wall", s.opts.MaxWall)
+				return Result{Status: StatusGuardWall, Iterations: iter, Elapsed: s.elapsed(start)}, nil
+			}
 			return Result{}, err
 		}
 
@@ -213,6 +316,26 @@ func (s *Supervisor) Run(ctx context.Context) (Result, error) {
 				return Result{Status: StatusFailed, Iterations: iter, Reason: sent.Reason, Elapsed: s.elapsed(start)}, nil
 			}
 		}
+
+		// C2: a claude that exits non-zero without writing STATUS made no
+		// progress. Without inspecting the exit code this hot-loops through
+		// MaxIters with no backoff and is then misreported as a benign guard
+		// trip. Log it, back off, and abort after too many consecutive failures.
+		if res.ExitCode != 0 {
+			claudeErrors++
+			s.logf("claude exited non-zero without progress",
+				"iter", iter, "exit_code", res.ExitCode, "consecutive", claudeErrors)
+			if claudeErrors >= s.maxClaudeErrors() {
+				return Result{Status: StatusClaudeError, Iterations: iter, Elapsed: s.elapsed(start)},
+					fmt.Errorf("claude exited non-zero on %d consecutive iterations without progress (last exit %d)",
+						claudeErrors, res.ExitCode)
+			}
+			if err := s.sleep(ctx, claudeBackoff(claudeErrors)); err != nil {
+				return Result{Status: StatusStopped, Iterations: iter, Elapsed: s.elapsed(start)}, err
+			}
+		} else {
+			claudeErrors = 0
+		}
 	}
 }
 
@@ -224,7 +347,7 @@ func (s *Supervisor) runSetup(ctx context.Context, id string) error {
 		}
 		s.logf("setup command", "index", i)
 		res, err := s.rt.Exec(ctx, id, container.ExecOptions{
-			Cmd:     cmd,
+			Cmd:     s.wrapCmd(cmd),
 			Workdir: s.opts.Workdir,
 			Stdout:  s.opts.LogOut,
 			Stderr:  s.opts.LogOut,
@@ -241,18 +364,26 @@ func (s *Supervisor) runSetup(ctx context.Context, id string) error {
 
 func (s *Supervisor) elapsed(start time.Time) time.Duration { return s.now().Sub(start) }
 
-// readFile reads a control file from the VM via `cat`. A non-zero exit code is
-// interpreted as "file absent" (exists=false).
+// readFile reads a control file from the VM via `cat`. It distinguishes a
+// genuinely-absent file (cat exits 1) from an exec failure such as a dead VM or
+// permission error (any other non-zero exit), which it surfaces as an error
+// rather than silently reporting "file absent". See C3.
 func (s *Supervisor) readFile(ctx context.Context, id, name string) (content string, exists bool, err error) {
 	p := path.Join(s.opts.ControlDir, name)
 	res, err := s.rt.Exec(ctx, id, container.ExecOptions{Cmd: []string{"cat", p}})
 	if err != nil {
 		return "", false, err
 	}
-	if res.ExitCode != 0 {
+	switch res.ExitCode {
+	case 0:
+		return res.Stdout, true, nil
+	case 1:
+		// cat's exit status for "No such file or directory": genuinely absent.
 		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("reading control file %s: cat exited %d (VM unreachable?): %s",
+			name, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
-	return res.Stdout, true, nil
 }
 
 func (s *Supervisor) fileExists(ctx context.Context, id, name string) (bool, error) {

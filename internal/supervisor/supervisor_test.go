@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,6 +345,206 @@ func TestRunSetupFailureAborts(t *testing.T) {
 	// VM still torn down.
 	if len(f.Removed()) != 1 {
 		t.Errorf("teardown not run after setup failure: %v", f.Removed())
+	}
+}
+
+// TestClaudeNonZeroExitBacksOffAndAborts covers C2: a claude that keeps exiting
+// non-zero without writing STATUS must not hot-loop to a benign guard trip. The
+// supervisor must back off between attempts and surface a distinct, non-success
+// error after MaxClaudeErrors consecutive failures.
+func TestClaudeNonZeroExitBacksOffAndAborts(t *testing.T) {
+	claudeCalls := 0
+	f := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			if opts.Cmd[0] == "cat" {
+				return container.ExecResult{ExitCode: 1}, nil // STATUS/STOP absent
+			}
+			claudeCalls++
+			return container.ExecResult{ExitCode: 7}, nil // claude fails every time
+		},
+	}
+	var sleeps []time.Duration
+	s := New(f, Options{Image: "img", Task: "x", MaxIters: 100, MaxClaudeErrors: 3})
+	s.Sleep = func(ctx context.Context, d time.Duration) error { sleeps = append(sleeps, d); return nil }
+
+	res, err := s.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for persistent non-zero claude exit")
+	}
+	if res.Status != StatusClaudeError {
+		t.Fatalf("Status = %v, want claude_error", res.Status)
+	}
+	if res.Status.Terminal() {
+		t.Fatal("claude_error must not be terminal-as-success/DONE")
+	}
+	if res.Status == StatusGuardIters {
+		t.Fatal("must not be misreported as a benign guard_iters trip")
+	}
+	// 3 consecutive failures: backoff before attempts 2 and 3, then abort.
+	if claudeCalls != 3 {
+		t.Fatalf("claude calls = %d, want 3", claudeCalls)
+	}
+	if len(sleeps) != 2 {
+		t.Fatalf("backoff sleeps = %d (%v), want 2", len(sleeps), sleeps)
+	}
+	if !(sleeps[1] > sleeps[0]) {
+		t.Fatalf("backoff must increase: %v", sleeps)
+	}
+	// Teardown still ran.
+	if len(f.Removed()) != 1 {
+		t.Fatalf("teardown not run: %v", f.Removed())
+	}
+}
+
+// TestClaudeNonZeroThenRecovers verifies a transient non-zero exit does not
+// abort: the counter resets on a clean exit (C2).
+func TestClaudeNonZeroThenRecovers(t *testing.T) {
+	v := newVM()
+	v.onClaude = func(call int, files map[string]string) {
+		if call == 3 {
+			files[statusPath(run.StatusFile)] = "DONE\n"
+		}
+	}
+	// Make the first claude exit non-zero, the rest zero.
+	f := &container.Fake{}
+	calls := 0
+	f.ExecFunc = func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+		if opts.Cmd[0] == "cat" {
+			if c, ok := v.files[opts.Cmd[1]]; ok {
+				return container.ExecResult{ExitCode: 0, Stdout: c}, nil
+			}
+			return container.ExecResult{ExitCode: 1}, nil
+		}
+		calls++
+		v.calls = calls
+		if v.onClaude != nil {
+			v.onClaude(calls, v.files)
+		}
+		if calls == 1 {
+			return container.ExecResult{ExitCode: 1}, nil
+		}
+		return container.ExecResult{ExitCode: 0}, nil
+	}
+	s := New(f, Options{Image: "img", Task: "x", MaxIters: 100, MaxClaudeErrors: 3})
+	s.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	res, err := s.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Status != StatusDone {
+		t.Fatalf("Status = %v, want done (transient failure should recover)", res.Status)
+	}
+}
+
+// TestReadControlExecFailureAborts covers C3: a non-"absent" cat exit (e.g. the
+// VM is gone) must abort the run rather than be treated as "file absent" and
+// looping forever.
+func TestReadControlExecFailureAborts(t *testing.T) {
+	claudeCalls := 0
+	f := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			if opts.Cmd[0] == "cat" {
+				// exit 2 is not cat's "file not found" (1): treat as VM unreachable.
+				return container.ExecResult{ExitCode: 2, Stderr: "exec: container not running"}, nil
+			}
+			claudeCalls++
+			return container.ExecResult{ExitCode: 0}, nil
+		},
+	}
+	s := New(f, Options{Image: "img", Task: "x", MaxIters: 100})
+	_, err := s.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected abort on control-read exec failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "VM unreachable") {
+		t.Fatalf("error should explain the VM read failure, got %v", err)
+	}
+	// Must not have looped: the STOP read fails before the first claude call.
+	if claudeCalls != 0 {
+		t.Fatalf("claude calls = %d, want 0 (aborted on first control read)", claudeCalls)
+	}
+	if len(f.Removed()) != 1 {
+		t.Fatalf("teardown not run: %v", f.Removed())
+	}
+}
+
+// TestExecBoundedByWallDeadline covers O3: the claude exec must be given a ctx
+// with a deadline derived from the remaining wall budget so a hung claude is
+// interrupted; without MaxWall there is no deadline.
+func TestExecBoundedByWallDeadline(t *testing.T) {
+	check := func(maxWall time.Duration, wantDeadline bool) {
+		var sawClaudeDeadline bool
+		f := &container.Fake{
+			ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+				if opts.Cmd[0] == "cat" {
+					if opts.Cmd[1] == statusPath(run.StatusFile) {
+						return container.ExecResult{ExitCode: 0, Stdout: "DONE\n"}, nil
+					}
+					return container.ExecResult{ExitCode: 1}, nil
+				}
+				_, ok := ctx.Deadline()
+				sawClaudeDeadline = ok
+				return container.ExecResult{ExitCode: 0}, nil
+			},
+		}
+		s := New(f, Options{Image: "img", Task: "x", MaxIters: 10, MaxWall: maxWall})
+		if _, err := s.Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if sawClaudeDeadline != wantDeadline {
+			t.Fatalf("MaxWall=%v: claude exec deadline present = %v, want %v", maxWall, sawClaudeDeadline, wantDeadline)
+		}
+	}
+	check(time.Hour, true) // bounded by remaining wall budget
+	check(0, false)        // no wall budget => no per-exec deadline
+}
+
+// TestSecretsFileSourcedNotInArgv covers S1 at the supervisor seam: when a
+// SecretsFile is configured, setup and claude commands are wrapped to source it
+// (so secrets never appear directly in argv); control reads stay unwrapped.
+func TestSecretsFileSourcedNotInArgv(t *testing.T) {
+	const secretsFile = "/work/.agentbox/env"
+	var claudeWrapped, setupWrapped bool
+	f := &container.Fake{
+		ExecFunc: func(ctx context.Context, id string, opts container.ExecOptions) (container.ExecResult, error) {
+			joined := strings.Join(opts.Cmd, " ")
+			switch {
+			case opts.Cmd[0] == "cat":
+				// Control reads must NOT be wrapped (no secrets needed).
+				if strings.Contains(joined, secretsFile) {
+					t.Errorf("control read should not source secrets: %v", opts.Cmd)
+				}
+				if opts.Cmd[1] == statusPath(run.StatusFile) {
+					return container.ExecResult{ExitCode: 0, Stdout: "DONE\n"}, nil
+				}
+				return container.ExecResult{ExitCode: 1}, nil
+			case strings.Contains(joined, "claude"):
+				if opts.Cmd[0] == "sh" && strings.Contains(joined, secretsFile) {
+					claudeWrapped = true
+				}
+			case strings.Contains(joined, "setup-marker"):
+				if opts.Cmd[0] == "sh" && strings.Contains(joined, secretsFile) {
+					setupWrapped = true
+				}
+			}
+			return container.ExecResult{ExitCode: 0}, nil
+		},
+	}
+	s := New(f, Options{
+		Image:       "img",
+		Task:        "x",
+		MaxIters:    10,
+		SecretsFile: secretsFile,
+		Setup:       [][]string{{"setup-marker"}},
+	})
+	if _, err := s.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !claudeWrapped {
+		t.Error("claude exec was not wrapped to source the secrets file")
+	}
+	if !setupWrapped {
+		t.Error("setup command was not wrapped to source the secrets file")
 	}
 }
 
