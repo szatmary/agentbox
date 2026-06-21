@@ -41,8 +41,8 @@ func newLogsCmd(g *globalFlags) *cobra.Command {
 // resolveLogPath maps a run name or directory to its log file path.
 func resolveLogPath(runsDir, ref string) (string, error) {
 	candidates := []string{
-		filepath.Join(ref, run.LogsDir, run.LogFile),               // ref is a run dir
-		filepath.Join(runsDir, ref, run.LogsDir, run.LogFile),      // ref is a run name
+		filepath.Join(ref, run.LogsDir, run.LogFile),          // ref is a run dir
+		filepath.Join(runsDir, ref, run.LogsDir, run.LogFile), // ref is a run name
 	}
 	for _, c := range candidates {
 		if fileExists(c) {

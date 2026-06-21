@@ -1,0 +1,32 @@
+# Example agentbox job: the long-running "go2110" mission.
+#
+# A self-resuming, auto-relaunching agent that works a large Go codebase, pushing
+# progress to GitHub between iterations so autorun can detect it via remote HEAD.
+#
+#   cd examples/go2110
+#   agentbox build
+#   agentbox autorun
+
+name = "go2110"
+repo = "https://github.com/szatmary/go2110.git"
+task = "task.md"
+
+[guards]
+max_wall  = "3h"
+max_iters = 500
+max_turns = 200
+
+[model]
+name = ""              # account default
+
+[auth]
+claude = "keychain"    # use the signed-in Claude Code credentials
+github = "gh"          # push via the gh-provided token
+
+[image]
+extra_packages = ["golang", "poppler-utils"]
+
+[autorun]
+per_run_wall   = "3h"
+max_noprogress = 3     # stop if 3 runs in a row don't advance remote HEAD
+cooldown       = "30s"

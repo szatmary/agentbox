@@ -17,8 +17,8 @@ type globalFlags struct {
 func newRootCmd() *cobra.Command {
 	g := &globalFlags{}
 	root := &cobra.Command{
-		Use:           "agentbox",
-		Short:         "Run autonomous, sandboxed Claude coding agents in Apple container microVMs",
+		Use:   "agentbox",
+		Short: "Run autonomous, sandboxed Claude coding agents in Apple container microVMs",
 		Long: "agentbox starts a disposable sandbox VM, runs a bounded Claude Code session\n" +
 			"inside it, resumes that session until the agent declares the task done, and can\n" +
 			"relaunch fresh sessions until the work converges — all unattended.\n\n" +

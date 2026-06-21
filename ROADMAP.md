@@ -29,4 +29,4 @@ non-darwin stub.
    `goreleaser` config, example `agentbox.toml` reproducing the go2110 job.
 
 ## Status
-See PROGRESS.md for per-step status and per-commit detail.
+**All 8 steps complete.** See PROGRESS.md for per-step status and per-commit detail.

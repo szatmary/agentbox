@@ -1,0 +1,63 @@
+# GoReleaser configuration for agentbox.
+# https://goreleaser.com
+version: 2
+
+project_name: agentbox
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agentbox
+    main: ./cmd/agentbox
+    binary: agentbox
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: agentbox
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Homebrew tap (publish once a release exists and the tap repo is created).
+brews:
+  - name: agentbox
+    repository:
+      owner: szatmary
+      name: homebrew-tap
+    homepage: "https://github.com/szatmary/agentbox"
+    description: "Run autonomous, sandboxed Claude coding agents in Apple container microVMs"
+    license: "MIT"
+    skip_upload: auto
+    caveats: |
+      agentbox's runtime is macOS-only: it requires Apple `container`
+      (macOS 26+, Apple silicon) and reads Claude credentials from the keychain.
+
+release:
+  prerelease: auto
