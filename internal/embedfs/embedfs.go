@@ -14,37 +14,56 @@ var files embed.FS
 // DefaultBaseImage is the base image the sandbox Dockerfile builds upon.
 const DefaultBaseImage = "debian:bookworm-slim"
 
+// DefaultID is the uid/gid used when HostUID/HostGID are left unset (nil). Note
+// that 0 is a real, valid value (root): a nil pointer means "unset", not zero,
+// so an explicit uid/gid of 0 passes through unchanged (preserving root/CI
+// bind-mount ownership). See C4.
+const DefaultID = 1000
+
 // DockerfileData parameterizes the sandbox Dockerfile template.
 type DockerfileData struct {
 	// BaseImage is the FROM image; defaults to DefaultBaseImage.
 	BaseImage string
 	// HostUID/HostGID match the host user so bind mounts are owned correctly.
-	HostUID, HostGID int
+	// A nil pointer means "unset" and defaults to DefaultID; an explicit 0 is
+	// honored (root) rather than being rewritten.
+	HostUID, HostGID *int
 	// Username is the in-image user name.
 	Username string
 	// ExtraPackages are additional apt packages to install.
 	ExtraPackages []string
 }
 
-func (d *DockerfileData) setDefaults() {
-	if d.BaseImage == "" {
-		d.BaseImage = DefaultBaseImage
-	}
-	if d.Username == "" {
-		d.Username = "agent"
-	}
-	if d.HostUID == 0 {
-		d.HostUID = 1000
-	}
-	if d.HostGID == 0 {
-		d.HostGID = 1000
-	}
+// dockerfileView is the resolved (pointer-free) data handed to the template.
+type dockerfileView struct {
+	BaseImage        string
+	HostUID, HostGID int
+	Username         string
+	ExtraPackages    []string
 }
 
 // RenderDockerfile renders the embedded Dockerfile template with data.
 func RenderDockerfile(data DockerfileData) (string, error) {
-	data.setDefaults()
-	return render("templates/Dockerfile.tmpl", data)
+	view := dockerfileView{
+		BaseImage:     data.BaseImage,
+		HostUID:       DefaultID,
+		HostGID:       DefaultID,
+		Username:      data.Username,
+		ExtraPackages: data.ExtraPackages,
+	}
+	if view.BaseImage == "" {
+		view.BaseImage = DefaultBaseImage
+	}
+	if view.Username == "" {
+		view.Username = "agent"
+	}
+	if data.HostUID != nil {
+		view.HostUID = *data.HostUID
+	}
+	if data.HostGID != nil {
+		view.HostGID = *data.HostGID
+	}
+	return render("templates/Dockerfile.tmpl", view)
 }
 
 // TaskTemplate returns the raw `task.md` scaffold written by `agentbox init`.

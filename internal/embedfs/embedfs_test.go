@@ -24,10 +24,12 @@ func TestRenderDockerfileDefaults(t *testing.T) {
 	}
 }
 
+func intPtr(i int) *int { return &i }
+
 func TestRenderDockerfileExtraPackages(t *testing.T) {
 	out, err := RenderDockerfile(DockerfileData{
-		HostUID:       501,
-		HostGID:       20,
+		HostUID:       intPtr(501),
+		HostGID:       intPtr(20),
 		Username:      "matt",
 		ExtraPackages: []string{"golang", "poppler-utils"},
 	})
@@ -38,6 +40,35 @@ func TestRenderDockerfileExtraPackages(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered Dockerfile missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderDockerfileUIDZero verifies that an explicit uid/gid of 0 (root) is
+// honored rather than rewritten to 1000 — the old setDefaults rewrote 0→1000,
+// breaking root/CI bind-mount ownership. A nil pointer still defaults. See C4.
+func TestRenderDockerfileUIDZero(t *testing.T) {
+	out, err := RenderDockerfile(DockerfileData{
+		HostUID:  intPtr(0),
+		HostGID:  intPtr(0),
+		Username: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "HOST_UID=0") || !strings.Contains(out, "HOST_GID=0") {
+		t.Errorf("explicit uid/gid 0 must pass through, got:\n%s", out)
+	}
+	if strings.Contains(out, "HOST_UID=1000") || strings.Contains(out, "HOST_GID=1000") {
+		t.Errorf("uid/gid 0 must not be remapped to 1000:\n%s", out)
+	}
+
+	// nil (unset) still defaults to DefaultID.
+	def, err := RenderDockerfile(DockerfileData{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(def, "HOST_UID=1000") {
+		t.Errorf("unset uid should default to 1000:\n%s", def)
 	}
 }
 

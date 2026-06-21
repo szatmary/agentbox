@@ -30,8 +30,8 @@ func newBuildCmd(g *globalFlags) *cobra.Command {
 			uid, gid, username := hostIdentity()
 			df, err := embedfs.RenderDockerfile(embedfs.DockerfileData{
 				BaseImage:     baseImage,
-				HostUID:       uid,
-				HostGID:       gid,
+				HostUID:       &uid,
+				HostGID:       &gid,
 				Username:      username,
 				ExtraPackages: extra,
 			})
